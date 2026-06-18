@@ -62,7 +62,12 @@ def _run_decision_chain(
     stock = _build_entry_input(candidate)
     entry = entry_eval(stock)
     risk = risk_eval(pf_meta, pos_list, market, entry["signal"])
-    sizing = sizing_calc(entry["signal"], risk["gate"], pf_meta, candidate["code"])
+    # sizing_engine 需要 state_snapshot 中的 volatility_20d 做高波少买
+    signal_with_snapshot = {
+        **entry["signal"],
+        "state_snapshot": entry.get("state_snapshot", {}),
+    }
+    sizing = sizing_calc(signal_with_snapshot, risk["gate"], pf_meta, candidate["code"])
 
     alpha = stock["alpha_context"]
     return {
@@ -268,7 +273,8 @@ def run(date: str = None) -> Dict[str, Any]:
                         "industry": p.get("industry",""), "volatility": vol})
     total_w = sum(abs(x["weight"]) for x in pos_list)
     dd = review_result.get("summary", {}).get("unrealized_pnl_pct", 0)
-    pf_meta = {"total_equity": review_result.get("summary",{}).get("total_assets",1_000_000),
+    total_equity = review_result.get("summary",{}).get("total_assets",1_000_000)
+    pf_meta = {"total_equity": total_equity, "equity": total_equity,
                "cash_ratio": max(0, 1 - total_w), "drawdown": dd/100 if dd else 0,
                "max_drawdown": 0.20, "prev_mode": "NORMAL", "max_risk_budget": 0.60,
                "positions": {x["code"]: {"weight": x["weight"], "pnl": x["pnl"],
@@ -359,6 +365,7 @@ def _build_virtual_pf_meta(
 
     pf_meta = {
         "total_equity": equity,
+        "equity": equity,
         "cash_ratio": cash / equity if equity > 0 else 1.0,
         "drawdown": drawdown,
         "max_drawdown": 0.20,
@@ -440,18 +447,11 @@ def run_backtest(
                     },
                 })
 
-    # ── ③ market（复用 buy_plan 逻辑：直接用 breadth 推 regime）──
-    # buy_plan 内部已计算但未在 result 中返回，这里临时推导
-    breadth_pct = bp_result.get("breadth_pct", 50)
-    if isinstance(breadth_pct, (int, float)) and breadth_pct > 0:
-        if breadth_pct >= 60:
-            regime = "strong"
-        elif breadth_pct >= 35:
-            regime = "neutral"
-        else:
-            regime = "weak"
-    else:
-        regime = "neutral"
+    # ── ③ market（直接复用 buy_plan 计算的 regime，不复推）──
+    bp_market = bp_result.get("market", {})
+    breadth_pct = bp_market.get("breadth_pct", 50)
+    regime = bp_market.get("regime", "neutral")
+    alpha_w = bp_market.get("alpha_weights", {})
     market = {"regime": regime, "vol_index": 0.55,
               "breadth": breadth_pct / 100 if isinstance(breadth_pct, (int, float)) else 0.5}
 
