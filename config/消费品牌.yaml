@@ -1,0 +1,127 @@
+# 消费品牌 — 生意模式配置
+# 利润来自品牌/渠道/产业链，PE 中等
+# 看 PE分位 + 毛利率 + ROE
+
+pool:
+  pe_min: 0
+  pe_max: 60
+  min_amount: 50000000
+  min_market_cap: 5000000000
+
+factor_weights:
+  value: 0.20
+  growth: 0.30
+  quality: 0.30
+  momentum: 0.20
+
+scoring:
+  # 价值因子（消费品 PE/PB 正常范围）
+  pe:
+    excellent: 15             # PE<15 → 1.0分
+    good: 25                  # PE<25 → 0.8分
+    average: 35               # PE<35 → 0.6分
+    high: 50                  # PE<50 → 0.4分
+  pb:
+    excellent: 2.0
+    good: 3.5
+    average: 5.0
+    high: 8.0
+  dividend_yield:
+    excellent: 4.0
+    very_good: 3.0
+    good: 2.0
+    average: 1.0
+
+  # 成长因子（消费看稳定增长）
+  revenue_growth:
+    excellent: 20
+    good: 12
+    average: 8
+    low: 3
+  profit_growth:
+    excellent: 20
+    good: 12
+    average: 8
+    low: 3
+  forecast_growth:
+    excellent: 20
+    good: 12
+    average: 8
+    low: 3
+
+  # 质量因子（品牌护城河看ROE+毛利率）
+  roe:
+    excellent: 25             # 白酒 ROE 20%+是常态
+    very_good: 20
+    good: 15
+    average: 12
+    below_avg: 8
+  gross_margin:
+    excellent: 60             # 白酒毛利率 70%+
+    very_good: 50
+    good: 40
+    average: 30
+    below_avg: 20
+  debt_ratio:
+    excellent: 20
+    very_good: 35
+    good: 50
+    average: 60
+    below_avg: 70
+  ocf_to_net_income:
+    excellent: 1.5
+    very_good: 1.0
+    good: 0.8
+    average: 0.5
+    below_avg: 0.3
+
+  # 动量因子
+  return_1m:
+    excellent: 8
+    good: 4
+    average: 0
+    negative: -5
+  return_3m:
+    excellent: 15
+    good: 8
+    average: 0
+    negative: -10
+  return_6m:
+    excellent: 25
+    good: 12
+    average: 0
+    negative: -15
+  return_12m:
+    excellent: 35
+    good: 18
+    average: 0
+    negative: -20
+  reversal_weight: 0.4
+
+signals:
+  cheap:
+    metric: "pe_percentile"
+    green: 30
+    yellow: 60
+  business:
+    metric: "gross_margin"
+    green: 30
+  expectation:
+    metric: "roe"
+    green: 15
+  money:
+    metric: "north_bound"
+    green: 0
+
+funnel:
+  layer1:
+    quality_min: 0.50
+  layer2_momentum:
+    momentum_min: 0.45
+    rsi_min: 35
+    rsi_max: 70
+  layer2_cycle:
+    quality_min: 0.55
+  layer3_entry:
+    entry_green: 0.70
+    entry_yellow: 0.45

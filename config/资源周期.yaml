@@ -1,0 +1,131 @@
+# 资源周期 — 生意模式配置
+# 利润跟着商品/运价/产能周期走，PE 底部虚高、顶部极低
+# 看 PB分位 + 股息率 + 商品方向
+
+pool:
+  pe_min: 0
+  pe_max: 40
+  min_amount: 50000000
+  min_market_cap: 5000000000
+
+factor_weights:
+  value: 0.35
+  growth: 0.20
+  quality: 0.15
+  momentum: 0.30
+
+# ── 因子评分阶梯（周期股放宽 ROE/毛利率，收紧 PE/PB）──
+scoring:
+  # 价值因子
+  pe:                          # 市盈率 = 股价÷每股收益，越低越便宜
+    excellent: 6               # PE<6 → 1.0分 极度低估
+    good: 10                   # PE<10 → 0.8分
+    average: 15                # PE<15 → 0.6分
+    high: 20                   # PE<20 → 0.4分 周期股 PE 天然低
+  pb:                          # 市净率 = 股价÷每股净资产，周期股核心指标
+    excellent: 0.8             # PB<0.8 → 1.0分 破净边缘
+    good: 1.2                  # PB<1.2 → 0.8分
+    average: 2.0               # PB<2.0 → 0.6分
+    high: 3.0                  # PB<3.0 → 0.4分
+  dividend_yield:              # 股息率 = 每股分红÷股价，周期底部生命线
+    excellent: 6.0             # >6% → 1.0分
+    very_good: 4.5             # >4.5% → 0.9分
+    good: 3.0                  # >3% → 0.7分
+    average: 2.0               # >2% → 0.5分
+    below_avg: 1.0             # >1% → 0.3分
+
+  # 成长因子
+  revenue_growth:              # 营收增速 = (本期-上期)÷上期，生意在扩张吗
+    excellent: 15              # >15% → 1.0分
+    good: 10                   # >10% → 0.8分
+    average: 5                 # >5% → 0.6分
+    low: 0                     # >0% → 0.4分
+  profit_growth:               # 利润增速，赚钱能力变强了吗
+    excellent: 20              # >20% → 1.0分
+    good: 10                   # >10% → 0.8分
+    average: 5                 # >5% → 0.6分
+    low: 0                     # >0% → 0.4分
+  forecast_growth:             # 分析师一致预期增速，市场认为会变好吗
+    excellent: 15              # >15% → 1.0分
+    good: 10                   # >10% → 0.8分
+    average: 5                 # >5% → 0.6分
+    low: 0                     # >0% → 0.4分
+
+  # 质量因子（周期股放宽）
+  roe:                         # ROE = 净利润÷净资产，每块钱净资产赚多少
+    excellent: 15              # >15% → 1.0分
+    very_good: 10              # >10% → 0.8分
+    good: 8                    # >8% → 0.7分
+    average: 5                 # >5% → 0.5分
+    below_avg: 3               # >3% → 0.3分  周期股 ROE 天然低
+  gross_margin:                # 毛利率 = (收入-成本)÷收入，赚钱能力强不强
+    excellent: 40              # >40% → 1.0分
+    very_good: 30              # >30% → 0.8分
+    good: 20                   # >20% → 0.7分
+    average: 15                # >15% → 0.5分
+    below_avg: 10              # >10% → 0.3分  周期股毛利率低是正常的
+  debt_ratio:                  # 负债率 = 总负债÷总资产，越低越安全
+    excellent: 20              # <20% → 1.0分
+    very_good: 35              # <35% → 0.8分
+    good: 50                   # <50% → 0.7分
+    average: 60                # <60% → 0.5分
+    below_avg: 70              # <70% → 0.3分
+  ocf_to_net_income:           # 经营现金流÷净利润，利润是真金白银还是账面数字
+    excellent: 1.0             # >1.0 → 1.0分  现金流覆盖利润
+    very_good: 0.8             # >0.8 → 0.8分
+    good: 0.5                  # >0.5 → 0.7分
+    average: 0.3               # >0.3 → 0.5分
+    below_avg: 0.1             # >0.1 → 0.3分
+
+  # 动量因子
+  return_1m:                   # 近1月收益，正向=追涨
+    excellent: 8               # >8% → 1.0分
+    good: 4                    # >4% → 0.8分
+    average: 0                 # >0% → 0.6分
+    negative: -5               # >-5% → 0.4分
+  return_3m:                   # 近3月收益
+    excellent: 15              # >15% → 1.0分
+    good: 8                    # >8% → 0.8分
+    average: 0                 # >0% → 0.6分
+    negative: -10              # >-10% → 0.4分
+  return_6m:                   # 近6月收益（扣除近1月，Fama-French动量）
+    excellent: 25              # >25% → 1.0分
+    good: 12                   # >12% → 0.8分
+    average: 0                 # >0% → 0.6分
+    negative: -15              # >-15% → 0.4分
+  return_12m:                  # 近12月收益（扣除近1月）
+    excellent: 35              # >35% → 1.0分
+    good: 18                   # >18% → 0.8分
+    average: 0                 # >0% → 0.6分
+    negative: -20              # >-20% → 0.4分
+  reversal_weight: 0.6         # 反转权重 0=纯追涨 1=纯反转，周期股偏向反转
+
+# ── 左侧信号灯 ──
+signals:
+  cheap:
+    metric: "pb_percentile"
+    green: 20
+    yellow: 40
+  business:
+    metric: "dividend_yield"
+    green: 2.0
+  expectation:
+    metric: "forecast_profit"
+    green: 0
+  money:
+    metric: "moneyflow"
+    green: 0
+
+# ── buy_plan 漏斗阈值 ──
+funnel:
+  layer1:
+    quality_min: 0.35
+  layer2_momentum:
+    momentum_min: 0.40
+    rsi_min: 30
+    rsi_max: 75
+  layer2_cycle:
+    quality_min: 0.40
+  layer3_entry:
+    entry_green: 0.65
+    entry_yellow: 0.40

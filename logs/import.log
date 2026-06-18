@@ -1,0 +1,214 @@
+预计算窗口: 2026-03-02 → 2026-06-11 (72 天) | 并行: 2 workers
+{'ok': True, 'imported': 393}
+{'ok': False, 'error': '抱歉，您没有接口(moneyflow_mkt_dc)访问权限，权限的具体详情访问：https://tushare.pro/document/1?doc_id=108。'}
+{'ok': False, 'error': '抱歉，您没有接口(moneyflow_ind_dc)访问权限，权限的具体详情访问：https://tushare.pro/document/1?doc_id=108。'}
+获取已入库的 A 股列表...
+  已有近期日线: 0 只
+  可投池(需导入): 931 只（已有 0 只跳过）
+  进度: 100/931 (成功 100, 失败 0)
+  进度: 200/931 (成功 200, 失败 0)
+  进度: 300/931 (成功 300, 失败 0)
+  进度: 400/931 (成功 400, 失败 0)
+  进度: 500/931 (成功 500, 失败 0)
+  进度: 600/931 (成功 600, 失败 0)
+  进度: 700/931 (成功 700, 失败 0)
+  进度: 800/931 (成功 800, 失败 0)
+  进度: 900/931 (成功 900, 失败 0)
+  完成: 931/931
+  01810 港股日线: 0 条
+  00700 港股日线: 0 条
+  资金流: 200/926 (成功 200, 失败 0)
+  资金流: 400/926 (成功 400, 失败 0)
+  资金流: 600/926 (成功 600, 失败 0)
+  资金流: 800/926 (成功 800, 失败 0)
+个股资金流完成: 926 成功, 0 失败
+{'ok': True, 'imported': 926, 'errors': 0}
+  PE刷新: 500/1364
+  PE刷新: 1000/1364
+PE刷新: 1364/1364
+信号缓存: 1364 只可投, 已缓存 0, 需计算 1364
+  信号: 100/1364
+  信号: 200/1364
+  信号: 300/1364
+  信号: 400/1364
+  信号: 500/1364
+  信号: 600/1364
+  信号: 700/1364
+  信号: 800/1364
+  信号: 900/1364
+  信号: 1000/1364
+  信号: 1100/1364
+  信号: 1200/1364
+  信号: 1300/1364
+信号缓存完成: 1364 只
+  预期: 200/930 (成功 200, 失败 0)
+  预期: 400/930 (成功 400, 失败 0)
+  预期: 600/930 (成功 599, 失败 0)
+  预期: 800/930 (成功 798, 失败 0)
+一致预期完成: 926 成功, 0 失败
+{'ok': True, 'imported': 926, 'errors': 0}
+无 PE 缺失的股票
+获取全市场 A 股行情 (Sina 源)...
+Please wait for a moment:   0%|          | 0/70 [00:00<?, ?it/s]Please wait for a moment:   1%|▏         | 1/70 [00:00<00:10,  6.49it/s]Please wait for a moment:   3%|▎         | 2/70 [00:00<00:09,  6.97it/s]Please wait for a moment:   4%|▍         | 3/70 [00:00<00:09,  6.91it/s]Please wait for a moment:   6%|▌         | 4/70 [00:00<00:08,  7.82it/s]Please wait for a moment:   7%|▋         | 5/70 [00:00<00:08,  7.69it/s]Please wait for a moment:   9%|▊         | 6/70 [00:01<00:22,  2.82it/s]Please wait for a moment:  10%|█         | 7/70 [00:01<00:18,  3.41it/s]Please wait for a moment:  11%|█▏        | 8/70 [00:01<00:18,  3.44it/s]Please wait for a moment:  13%|█▎        | 9/70 [00:03<00:33,  1.82it/s]Please wait for a moment:  14%|█▍        | 10/70 [00:04<00:45,  1.33it/s]Please wait for a moment:  16%|█▌        | 11/70 [00:04<00:39,  1.48it/s]Please wait for a moment:  17%|█▋        | 12/70 [00:04<00:29,  1.93it/s]Please wait for a moment:  19%|█▊        | 13/70 [00:05<00:28,  2.02it/s]Please wait for a moment:  21%|██▏       | 15/70 [00:05<00:16,  3.32it/s]Please wait for a moment:  23%|██▎       | 16/70 [00:05<00:18,  2.87it/s]Please wait for a moment:  24%|██▍       | 17/70 [00:06<00:15,  3.42it/s]Please wait for a moment:  26%|██▌       | 18/70 [00:06<00:12,  4.07it/s]Please wait for a moment:  27%|██▋       | 19/70 [00:06<00:10,  4.75it/s]Please wait for a moment:  30%|███       | 21/70 [00:06<00:08,  6.02it/s]Please wait for a moment:  33%|███▎      | 23/70 [00:06<00:06,  7.13it/s]Please wait for a moment:  34%|███▍      | 24/70 [00:06<00:06,  6.92it/s]Please wait for a moment:  36%|███▌      | 25/70 [00:07<00:06,  7.39it/s]Please wait for a moment:  37%|███▋      | 26/70 [00:07<00:09,  4.42it/s]Please wait for a moment:  39%|███▊      | 27/70 [00:07<00:08,  4.83it/s]Please wait for a moment:  40%|████      | 28/70 [00:08<00:12,  3.28it/s]Please wait for a moment:  41%|████▏     | 29/70 [00:08<00:10,  3.73it/s]Please wait for a moment:  43%|████▎     | 30/70 [00:08<00:13,  2.92it/s]Please wait for a moment:  44%|████▍     | 31/70 [00:09<00:10,  3.57it/s]Please wait for a moment:  46%|████▌     | 32/70 [00:09<00:09,  4.07it/s]Please wait for a moment:  47%|████▋     | 33/70 [00:09<00:08,  4.53it/s]Please wait for a moment:  49%|████▊     | 34/70 [00:09<00:07,  5.04it/s]Please wait for a moment:  50%|█████     | 35/70 [00:09<00:05,  5.84it/s]Please wait for a moment:  51%|█████▏    | 36/70 [00:09<00:05,  6.08it/s]Please wait for a moment:  53%|█████▎    | 37/70 [00:10<00:07,  4.42it/s]Please wait for a moment:  54%|█████▍    | 38/70 [00:10<00:06,  5.27it/s]Please wait for a moment:  56%|█████▌    | 39/70 [00:10<00:05,  5.41it/s]Please wait for a moment:  57%|█████▋    | 40/70 [00:10<00:05,  5.59it/s]Please wait for a moment:  59%|█████▊    | 41/70 [00:10<00:04,  6.25it/s]Please wait for a moment:  60%|██████    | 42/70 [00:10<00:04,  6.12it/s]Please wait for a moment:  61%|██████▏   | 43/70 [00:11<00:07,  3.78it/s]Please wait for a moment:  63%|██████▎   | 44/70 [00:11<00:05,  4.62it/s]Please wait for a moment:  64%|██████▍   | 45/70 [00:11<00:07,  3.52it/s]Please wait for a moment:  66%|██████▌   | 46/70 [00:12<00:08,  2.97it/s]Please wait for a moment:  67%|██████▋   | 47/70 [00:12<00:06,  3.69it/s]Please wait for a moment:  69%|██████▊   | 48/70 [00:13<00:08,  2.56it/s]Please wait for a moment:  70%|███████   | 49/70 [00:13<00:06,  3.09it/s]Please wait for a moment:  71%|███████▏  | 50/70 [00:13<00:05,  3.60it/s]Please wait for a moment:  73%|███████▎  | 51/70 [00:13<00:04,  4.11it/s]Please wait for a moment:  74%|███████▍  | 52/70 [00:13<00:04,  4.38it/s]Please wait for a moment:  76%|███████▌  | 53/70 [00:14<00:03,  5.23it/s]Please wait for a moment:  77%|███████▋  | 54/70 [00:14<00:02,  5.64it/s]Please wait for a moment:  79%|███████▊  | 55/70 [00:14<00:02,  5.87it/s]Please wait for a moment:  81%|████████▏ | 57/70 [00:14<00:01,  7.22it/s]Please wait for a moment:  83%|████████▎ | 58/70 [00:14<00:01,  7.22it/s]Please wait for a moment:  84%|████████▍ | 59/70 [00:14<00:01,  6.82it/s]Please wait for a moment:  86%|████████▌ | 60/70 [00:14<00:01,  6.95it/s]Please wait for a moment:  87%|████████▋ | 61/70 [00:15<00:01,  6.98it/s]Please wait for a moment:  90%|█████████ | 63/70 [00:15<00:00,  8.27it/s]Please wait for a moment:  91%|█████████▏| 64/70 [00:15<00:00,  8.15it/s]Please wait for a moment:  93%|█████████▎| 65/70 [00:16<00:01,  4.11it/s]Please wait for a moment:  94%|█████████▍| 66/70 [00:16<00:00,  4.55it/s]Please wait for a moment:  96%|█████████▌| 67/70 [00:16<00:00,  4.97it/s]Please wait for a moment:  97%|█████████▋| 68/70 [00:16<00:00,  5.25it/s]Please wait for a moment:  99%|█████████▊| 69/70 [00:16<00:00,  5.68it/s]Please wait for a moment: 100%|██████████| 70/70 [00:16<00:00,  6.05it/s]                                                                         获取申万行业编码映射...
+  申万覆盖: 5528 只
+全市场轻量导入完成: 5526 只, 失败 0, 含行业编码 5528 只
+  PE刷新: 500/1703
+  PE刷新: 1000/1703
+  PE刷新: 1500/1703
+PE刷新: 1703/1703
+信号缓存: 1703 只可投, 已缓存 473, 需计算 1235
+  信号: 100/1235
+  信号: 200/1235
+  信号: 300/1235
+  信号: 400/1235
+  信号: 500/1235
+  信号: 600/1235
+  信号: 700/1235
+  信号: 800/1235
+  信号: 900/1235
+  信号: 1000/1235
+  信号: 1100/1235
+  信号: 1200/1235
+信号缓存完成: 1235 只
+{'ok': True, 'imported': 12, 'date': '2026-06-15', 'source': 'tushare_wallstreetcn'}
+{'ok': True, 'trade_date': '2026-06-15', 'saved': 4, 'skipped_north_closed': 0}
+{'ok': True, 'imported': 23, 'date': '2026-06-15', 'source': 'tushare_wallstreetcn'}
+{'ok': True, 'imported': 199}
+{'ok': False, 'error': '抱歉，您没有接口(moneyflow_mkt_dc)访问权限，权限的具体详情访问：https://tushare.pro/document/1?doc_id=108。'}
+{'ok': False, 'error': '抱歉，您没有接口(moneyflow_ind_dc)访问权限，权限的具体详情访问：https://tushare.pro/document/1?doc_id=108。'}
+  资金流: 200/1265 (成功 200, 失败 0)
+  资金流: 400/1265 (成功 399, 失败 0)
+  资金流: 600/1265 (成功 599, 失败 0)
+  资金流: 800/1265 (成功 799, 失败 0)
+  资金流: 1000/1265 (成功 999, 失败 0)
+  资金流: 1200/1265 (成功 1199, 失败 0)
+个股资金流完成: 1264 成功, 0 失败
+{'ok': True, 'imported': 1264, 'errors': 0}
+获取已入库的 A 股列表...
+  已有近期日线: 0 只
+  可投池(需导入): 1270 只（已有 0 只跳过）
+  进度: 100/1270 (成功 100, 失败 0)
+  进度: 200/1270 (成功 200, 失败 0)
+  进度: 300/1270 (成功 300, 失败 0)
+  进度: 400/1270 (成功 400, 失败 0)
+  进度: 500/1270 (成功 500, 失败 0)
+  进度: 600/1270 (成功 600, 失败 0)
+  进度: 700/1270 (成功 700, 失败 0)
+  进度: 800/1270 (成功 800, 失败 0)
+  进度: 900/1270 (成功 900, 失败 0)
+  进度: 1000/1270 (成功 1000, 失败 0)
+  进度: 1100/1270 (成功 1100, 失败 0)
+  进度: 1200/1270 (成功 1200, 失败 0)
+  完成: 1270/1270
+  01810 港股日线: 0 条
+  00700 港股日线: 0 条
+  PE刷新: 500/1608
+  PE刷新: 1000/1608
+  PE刷新: 1500/1608
+PE刷新: 1608/1608
+信号缓存: 1608 只可投, 已缓存 1702, 需计算 0
+  预期: 200/1183 (成功 200, 失败 0)
+  预期: 400/1183 (成功 400, 失败 0)
+  预期: 600/1183 (成功 599, 失败 0)
+  预期: 800/1183 (成功 798, 失败 0)
+  预期: 1000/1183 (成功 995, 失败 0)
+一致预期完成: 1178 成功, 0 失败
+{'ok': True, 'imported': 1178, 'errors': 0}
+{'ok': True, 'imported': 32, 'date': '2026-06-16', 'source': 'tushare_wallstreetcn'}
+{'ok': True, 'trade_date': '2026-06-16', 'saved': 4, 'skipped_north_closed': 0}
+{'ok': True, 'imported': 42, 'date': '2026-06-16', 'source': 'tushare_wallstreetcn'}
+{'ok': True, 'imported': 178}
+{'ok': False, 'error': '抱歉，您没有接口(moneyflow_mkt_dc)访问权限，权限的具体详情访问：https://tushare.pro/document/1?doc_id=108。'}
+{'ok': True, 'imported': 444, 'range': '20260611-20260616'}
+  资金流: 200/1172 (成功 199, 失败 0)
+  资金流: 400/1172 (成功 399, 失败 0)
+  资金流: 600/1172 (成功 599, 失败 0)
+  资金流: 800/1172 (成功 799, 失败 0)
+  资金流: 1000/1172 (成功 999, 失败 0)
+个股资金流完成: 1171 成功, 0 失败
+{'ok': True, 'imported': 1171, 'errors': 0}
+获取已入库的 A 股列表...
+  已有近期日线: 0 只
+  可投池(需导入): 1183 只（已有 0 只跳过）
+  进度: 100/1183 (成功 100, 失败 0)
+  进度: 200/1183 (成功 200, 失败 0)
+  进度: 300/1183 (成功 300, 失败 0)
+  进度: 400/1183 (成功 400, 失败 0)
+  进度: 500/1183 (成功 500, 失败 0)
+  进度: 600/1183 (成功 600, 失败 0)
+  进度: 700/1183 (成功 700, 失败 0)
+  进度: 800/1183 (成功 800, 失败 0)
+  进度: 900/1183 (成功 900, 失败 0)
+  进度: 1000/1183 (成功 1000, 失败 0)
+  进度: 1100/1183 (成功 1100, 失败 0)
+  完成: 1183/1183
+  01810 港股日线: 0 条
+  00700 港股日线: 0 条
+  预期: 200/1134 (成功 200, 失败 0)
+  预期: 400/1134 (成功 400, 失败 0)
+  预期: 600/1134 (成功 598, 失败 0)
+  预期: 800/1134 (成功 798, 失败 0)
+  预期: 1000/1134 (成功 995, 失败 0)
+一致预期完成: 1129 成功, 0 失败
+{'ok': True, 'imported': 1129, 'errors': 0}
+{'ok': True, 'imported': 27, 'date': '2026-06-17', 'source': 'tushare_wallstreetcn'}
+{'ok': True, 'trade_date': '2026-06-17', 'saved': 4, 'skipped_north_closed': 0}
+{'ok': True, 'imported': 50, 'date': '2026-06-17', 'source': 'tushare_wallstreetcn'}
+{'ok': True, 'imported': 175}
+{'ok': False, 'error': '抱歉，您没有接口(moneyflow_mkt_dc)访问权限，权限的具体详情访问：https://tushare.pro/document/1?doc_id=108。'}
+{'ok': True, 'imported': 444, 'range': '20260612-20260617'}
+Traceback (most recent call last):
+  File "/data/stock_recommender_system/scripts/data_import_pipeline.py", line 1533, in <module>
+    main()
+  File "/data/stock_recommender_system/scripts/data_import_pipeline.py", line 1447, in main
+    mongodb_config = _load_mongodb_config(args.config)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/data/stock_recommender_system/scripts/factor_data_import_service.py", line 56, in _load_mongodb_config
+    config = _load_yaml(config_path)
+             ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/data/stock_recommender_system/scripts/factor_data_import_service.py", line 52, in _load_yaml
+    return yaml.safe_load(file) or {}
+           ^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3/dist-packages/yaml/__init__.py", line 125, in safe_load
+    return load(stream, SafeLoader)
+           ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3/dist-packages/yaml/__init__.py", line 81, in load
+    return loader.get_single_data()
+           ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3/dist-packages/yaml/constructor.py", line 49, in get_single_data
+    node = self.get_single_node()
+           ^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3/dist-packages/yaml/composer.py", line 36, in get_single_node
+    document = self.compose_document()
+               ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3/dist-packages/yaml/composer.py", line 55, in compose_document
+    node = self.compose_node(None, None)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3/dist-packages/yaml/composer.py", line 84, in compose_node
+    node = self.compose_mapping_node(anchor)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3/dist-packages/yaml/composer.py", line 133, in compose_mapping_node
+    item_value = self.compose_node(node, item_key)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3/dist-packages/yaml/composer.py", line 84, in compose_node
+    node = self.compose_mapping_node(anchor)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3/dist-packages/yaml/composer.py", line 133, in compose_mapping_node
+    item_value = self.compose_node(node, item_key)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3/dist-packages/yaml/composer.py", line 84, in compose_node
+    node = self.compose_mapping_node(anchor)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3/dist-packages/yaml/composer.py", line 127, in compose_mapping_node
+    while not self.check_event(MappingEndEvent):
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3/dist-packages/yaml/parser.py", line 98, in check_event
+    self.current_event = self.state()
+                         ^^^^^^^^^^^^
+  File "/usr/lib/python3/dist-packages/yaml/parser.py", line 438, in parse_block_mapping_key
+    raise ParserError("while parsing a block mapping", self.marks[-1],
+yaml.parser.ParserError: while parsing a block mapping
+  in "/data/stock_recommender_system/config/config_complete.yaml", line 108, column 5
+expected <block end>, but found '<block mapping start>'
+  in "/data/stock_recommender_system/config/config_complete.yaml", line 112, column 9
+{'ok': True, 'trade_date': '2026-06-18', 'saved': 4, 'skipped_north_closed': 0}

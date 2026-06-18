@@ -1,0 +1,81 @@
+# 持仓配置模板
+# 复制为 data/portfolio.yaml 后填写真实持仓。
+
+account:
+  broker: "平安证券" # 券商名称
+  base_currency: "CNY" # 总资产统计币种
+  total_assets: null # 可选：券商显示的账户总资产；填了以后系统会以它为准
+  cash: null # 可选兼容字段；只有不填 total_assets 且不填 cash_by_currency 时才会使用
+  cash_by_currency: # 可选：各币种现金；没有券商API，所以现金仍需手动填
+    CNY: 30000
+  fx_rates_to_base: # 汇率配置；写 auto 表示系统尝试实时查询，失败时使用内置兜底汇率
+    CNY: 1
+    HKD: auto
+    USD: auto
+  risk_profile: "balanced" # conservative保守, balanced均衡/稳健, aggressive激进
+  target:
+    max_single_position_pct: 15 # 单只资产最大仓位比例
+    max_industry_position_pct: 30 # 单个行业最大仓位比例
+    min_cash_pct: 20 # 最低现金比例
+    profit_target_pct: 12 # 目标盈利比例
+    max_drawdown_pct: 8 # 可接受最大回撤比例
+    strategy_goal: "稳健盈利" # 稳健盈利, 波段增强, 进攻增长, 防守保值
+
+positions:
+  - code: "000001" # 股票/ETF代码，必须加引号
+    name: "平安银行" # 名称
+    market: "A股" # A股, 港股, 美股, 场内基金
+    asset_type: "stock" # stock股票, etf场内ETF, fund基金, bond债券
+    currency: "CNY" # CNY, HKD, USD
+    quantity: 2000 # 持仓数量
+    cost_price: 10.80 # 成本价
+    allow_akshare_price_fallback: false # 是否允许 AKShare 作为行情兜底；默认 false，避免代理环境下报错很长
+    industry: "银行" # 行业/主题
+    style: "红利防御" # 组合角色
+    thesis: "低估值银行股，作为组合防守和红利底仓。" # 买入/持有理由
+    intended_holding_period: "medium" # short短线, swing波段, medium中线, long长期
+    stop_loss_price: 9.90 # 止损价
+    take_profit_price: 13.20 # 止盈价
+    add_price: 10.30 # 加仓观察价
+    trim_price: 12.60 # 减仓观察价
+    invalid_conditions: # 买入逻辑失效条件
+      - "银行板块估值修复失败且跌破中期趋势"
+      - "资产质量明显恶化"
+
+  - code: "02800"
+    name: "盈富基金"
+    market: "港股"
+    asset_type: "etf"
+    currency: "HKD"
+    cost_currency: "CNY" # 成本价币种；如果券商显示人民币成本就填 CNY，如果显示港币成本就填 HKD
+    decision_currency: "CNY" # 交易判断币种；止损/止盈/加仓/减仓价格都按这个币种解释
+    quantity: 1000
+    cost_price: 18.50
+    industry: "港股宽基"
+    style: "指数配置"
+    thesis: "港股宽基 ETF，用于港股市场 beta 配置。"
+    intended_holding_period: "medium"
+    stop_loss_price: 17.20
+    take_profit_price: 22.00
+    add_price: 18.00
+    trim_price: 21.00
+    invalid_conditions:
+      - "港股流动性明显恶化"
+      - "指数跌破长期趋势且无法修复"
+
+watchlist:
+  - code: "600028" # 观察股票/ETF代码
+    name: "中国石化" # 名称
+    market: "A股" # 市场
+    asset_type: "stock" # 资产类型
+    currency: "CNY" # 币种
+    industry: "能源" # 行业/主题
+    style: "红利防御" # 组合角色
+    reason: "能源周期和高股息配置观察" # 观察原因
+    target_buy_zone: "5.80-6.10" # 目标买入区间
+
+notes:
+  - "只需要录入成本价，current_price 可以不填；系统会尽量自动查价。"
+  - "如果自动查价失败，系统会临时使用 cost_price 估算仓位，并在结果中标记价格不可用。"
+  - "港股和 ETF 会按 fx_rates_to_base 折算到基础币种。"
+  - "thesis 和 invalid_conditions 很重要，用于判断买入逻辑是否仍然成立。"

@@ -1,0 +1,18 @@
+预计算 v3: 2026-06-16 → 2026-06-16 (1 天) | meta+trends+factors | workers=1
+  [2026-06-16] 开始...
+  trend: 100/222
+  trend: 200/222
+  factor: 100/222
+  factor: 200/222
+  2026-06-16: meta=222 trend=222 factor=222 (222 候选, 15s)
+
+完成: 1/1 天, meta=222 trends=222 factors=222
+预计算 v3: 2026-06-17 → 2026-06-17 (1 天) | meta+trends+factors | workers=1
+  [2026-06-17] 开始...
+  trend: 100/250
+  trend: 200/250
+  factor: 100/250
+  factor: 200/250
+  2026-06-17: meta=250 trend=250 factor=250 (250 候选, 51s)
+
+完成: 1/1 天, meta=250 trends=250 factors=250

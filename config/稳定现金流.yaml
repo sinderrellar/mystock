@@ -1,0 +1,127 @@
+# 稳定现金流 — 生意模式配置
+# 利润来自牌照/垄断/刚需，PE 天然低
+# 看 股息率 + ROE + 分红稳定性
+
+pool:
+  pe_min: 0
+  pe_max: 15
+  min_amount: 100000000
+  min_market_cap: 10000000000
+
+factor_weights:
+  value: 0.30
+  growth: 0.10
+  quality: 0.35
+  momentum: 0.25
+
+scoring:
+  # 价值因子（低PE低PB是正常态，收紧门槛）
+  pe:
+    excellent: 5              # PE<5 → 1.0分  银行PE6是常态
+    good: 8                   # PE<8 → 0.8分
+    average: 12               # PE<12 → 0.6分
+    high: 18                  # PE<18 → 0.4分
+  pb:
+    excellent: 0.5            # PB<0.5 → 1.0分
+    good: 0.8                 # PB<0.8 → 0.8分
+    average: 1.2              # PB<1.2 → 0.6分
+    high: 2.0                 # PB<2.0 → 0.4分
+  dividend_yield:              # 股息率是核心指标
+    excellent: 6.0
+    very_good: 4.5
+    good: 3.5
+    average: 2.5
+
+  # 成长因子（现金流股不追求增长，阈值最低）
+  revenue_growth:
+    excellent: 10
+    good: 5
+    average: 3
+    low: 0
+  profit_growth:
+    excellent: 12
+    good: 8
+    average: 5
+    low: 0
+  forecast_growth:
+    excellent: 10
+    good: 5
+    average: 3
+    low: 0
+
+  # 质量因子（现金流股要求最高）
+  roe:
+    excellent: 18
+    very_good: 15
+    good: 12
+    average: 10
+    below_avg: 8
+  gross_margin:
+    excellent: 50
+    very_good: 40
+    good: 30
+    average: 25
+    below_avg: 20
+  debt_ratio:
+    excellent: 20
+    very_good: 35
+    good: 50
+    average: 60
+    below_avg: 70
+  ocf_to_net_income:
+    excellent: 1.2
+    very_good: 1.0
+    good: 0.8
+    average: 0.5
+    below_avg: 0.3
+
+  # 动量因子（不在意动量）
+  return_1m:
+    excellent: 5
+    good: 3
+    average: 0
+    negative: -3
+  return_3m:
+    excellent: 10
+    good: 5
+    average: 0
+    negative: -8
+  return_6m:
+    excellent: 15
+    good: 8
+    average: 0
+    negative: -10
+  return_12m:
+    excellent: 20
+    good: 10
+    average: 0
+    negative: -15
+  reversal_weight: 0.5        # 中性
+
+signals:
+  cheap:
+    metric: "dividend_yield"
+    green: 4.0
+    yellow: 3.0
+  business:
+    metric: "roe"
+    green: 12
+  expectation:
+    metric: "profit_stable"
+    green: 0
+  money:
+    metric: "north_bound"
+    green: 0
+
+funnel:
+  layer1:
+    quality_min: 0.55
+  layer2_momentum:
+    momentum_min: 0.35
+    rsi_min: 25
+    rsi_max: 80
+  layer2_cycle:
+    quality_min: 0.60
+  layer3_entry:
+    entry_green: 0.65
+    entry_yellow: 0.40

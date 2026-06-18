@@ -1,0 +1,161 @@
+# 股票推荐系统配置（基础设施 + 非因子阈值）
+# 因子权重/评分阶梯 → config/资源周期.yaml 等 4 个文件
+# 行业→组映射 → config/industry_groups.yaml
+
+# LLM 配置
+llm:
+  api_key: "sk-0863692ca2c1413591d7dd39989f33f6"
+  base_url: "https://api.deepseek.com/anthropic"
+  model: "deepseek-v4-flash"
+  timeout: 15
+
+# 数据源配置
+data_sources:
+  tushare:
+    token: "b36c505c74b5ef832929ea94d3b0572e2d95e743f6613586876bd09b"
+  mongodb:
+    enabled: true
+    uri: "mongodb://localhost:27017/tradingagents"
+    database: "tradingagents"
+    collections:
+      basic_info: "stock_basic_info"
+      daily_quotes: "stock_daily_quotes"
+      financial_data: "stock_financial_data"
+      news: "stock_news"
+      hsgt_flow: "stock_hsgt_flow"
+    stock_pool:
+      limit: 500
+      market_allowlist: ["主板", "创业板", "科创板"]
+      min_amount: 50000000         # 成交额 >= 5000万（元）
+      min_market_cap: 5000000000   # 市值 >= 50亿（元）
+
+# 输出配置
+output:
+  reports_dir: "./reports"
+  logs_dir: "./logs"
+  keep_history_days: 30
+
+# 顶层：行业轮动
+pyramid_top_layer:
+  enabled: true
+  weight: 0.20
+  sector_rotation:
+    enabled: true
+    lookback_days: 20
+    top_n_sectors: 5
+    max_sector_exposure: 0.25
+  position_adjustment:
+    bullish_position: 0.9
+    neutral_position: 0.7
+    bearish_position: 0.5
+
+# 中层：多因子选股
+# 因子权重/评分阶梯已迁移到 4 个生意模式 config
+# 此处仅保留 buy_plan / strategy_signals / sector_radar 的运行时阈值
+pyramid_middle_layer:
+  enabled: true
+  weight: 0.50
+  top_n: 30
+
+  # buy_plan 五层漏斗阈值
+  buy_plan:
+    layer1_trend:
+      quality_min: 0.45
+    layer2_strategy:
+      quality_min: 0.50
+    layer3_entry:
+      rsi_min: 40
+      rsi_max: 70
+      rsi_low_min: 40
+      rsi_low_max: 55
+    market_breadth:
+      halt_threshold: 15
+
+  # strategy_signals 信号解读阈值
+  strategy_signals:
+    data_quality:
+      excellent: 0.9
+      good: 0.75
+      warning: 0.5
+    score_buckets:
+      strong: 0.75
+      good: 0.60
+      moderate: 0.45
+    value_divergence:
+      value_high: 0.7
+      momentum_low: 0.4
+    industry_momentum:
+      hot: 0.7
+      improving: 0.4
+
+  # 短周期市场状态驱动的动态因子权重
+  # MA20 宽度分位（未来改历史分位）：>60%强 / 35-60%震荡 / <35%弱
+  market_regime:
+    strong_breadth: 60        # 站上 MA20 股票占比 > 60% = 强势
+    weak_breadth: 35          # 站上 MA20 股票占比 < 35% = 弱势
+    weak_min_cycle: 0.50      # 弱势下抄底保护：cycle 必须 > 0.50
+    alpha_weights:
+      strong:                 # 强势：动量优先，追涨
+        momentum: 0.55
+        cycle: 0.30
+        turnaround: 0.15
+      neutral:                # 震荡：均衡
+        momentum: 0.45
+        cycle: 0.35
+        turnaround: 0.20
+      weak:                   # 弱势：反转+周期优先，抄底需 cycle 确认
+        momentum: 0.30
+        cycle: 0.40
+        turnaround: 0.30
+
+  # 仓位分配参数（sizing_engine 读取，按牛熊动态切换）
+  position_sizing:
+    baseline_vol: 0.025       # 波动率归一基准（A股中位日波动约2.5%）
+    drawdown_penalty_1: 0.10  # 回撤>10% → 仓位×0.7
+    drawdown_penalty_2: 0.15  # 回撤>15% → 仓位×0.5
+    max_risk_budget:           # 风险预算上限（按市场宽度动态选档）
+      strong: 0.70             # 牛市：满仓运行
+      neutral: 0.50            # 震荡：标准
+      weak: 0.30               # 熊市：降风险
+
+  # turnaround_score 因子权重 + 标签阈值
+  turnaround:
+    tag_threshold: 0.65       # >=此值标记为低位拐点
+    weights:
+      valuation: 0.25         # 估值分（行业内排名 + 自身历史分位）
+      price_recovery: 0.45    # 价格企稳（改善速度 + MA + 量确认）
+      sector_inflection: 0.30 # 行业拐点（连续百分位排名）
+    forecast_weight:           # forecast 数据就绪后启用
+      valuation: 0.25
+      forecast: 0.30
+      price_recovery: 0.25
+      sector_inflection: 0.20
+
+  # sector_radar 行业轮动阈值
+  sector_radar:
+    momentum:
+      hot: 0.7
+      warm: 0.4
+    pe_filter:
+      min: 0
+      max: 500
+    pb_filter:
+      min: 0
+      max: 50
+
+# 底层：交易执行
+pyramid_bottom_layer:
+  enabled: true
+  weight: 0.30
+  liquidity:
+    min_amount: 100000000
+    min_turnover_rate: 1.0
+  buy_zone:
+    min_pct: -3
+    max_pct: 5
+  stop_loss: 8
+  take_profit: 20
+  position_sizing:
+    initial_position: 0.3
+    add_position_1: 0.3
+    add_position_2: 0.4

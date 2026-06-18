@@ -1,0 +1,481 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Portfolio Dashboard — 2026-06-09</title>
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+body { background:#0d1117; color:#c9d1d9; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', monospace; padding:20px; }
+.container { max-width:1400px; margin:0 auto; }
+h1 { font-size:1.4em; color:#f0f6fc; border-bottom:1px solid #30363d; padding-bottom:10px; margin-bottom:16px; }
+h2 { font-size:1.1em; color:#f0f6fc; margin:20px 0 12px; }
+.grid-2 { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
+.grid-3 { display:grid; grid-template-columns:repeat(3,1fr); gap:12px; }
+.grid-6 { display:grid; grid-template-columns:repeat(auto-fill,minmax(380px,1fr)); gap:12px; }
+
+/* summary bar */
+.summary { background:#161b22; border:1px solid #30363d; border-radius:8px; padding:16px; margin-bottom:16px; }
+.summary .metrics { display:flex; gap:24px; flex-wrap:wrap; }
+.summary .metric { display:flex; flex-direction:column; }
+.summary .metric label { font-size:0.7em; color:#8b949e; text-transform:uppercase; }
+.summary .metric span { font-size:1.2em; font-weight:600; }
+.positive { color:#3fb950; }
+.negative { color:#f85149; }
+.warning-color { color:#d29922; }
+
+/* cards */
+.card { background:#161b22; border:1px solid #30363d; border-radius:8px; overflow:hidden; }
+.card.stop-triggered { border-color:#f85149; border-width:2px; }
+.card.stop-urgent { border-color:#f85149; }
+.card.stop-warning { border-color:#d29922; }
+.card.watch { border-color:#1f6feb30; }
+.card-header { padding:8px 14px; background:#1c2129; display:flex; align-items:center; gap:10px; border-bottom:1px solid #30363d; }
+.card-header .code { font-weight:700; color:#58a6ff; }
+.card-header .name { color:#f0f6fc; }
+.card-header .market { color:#8b949e; font-size:0.8em; }
+.card-header .timing { margin-left:auto; padding:2px 8px; border-radius:4px; font-size:0.8em; background:#23863620; color:#3fb950; }
+.card-body { padding:10px 14px; }
+.metric-row { display:grid; grid-template-columns:repeat(4,1fr); gap:8px; margin-bottom:6px; }
+.metric { display:flex; flex-direction:column; }
+.metric label { font-size:0.65em; color:#8b949e; text-transform:uppercase; }
+.metric span { font-size:0.9em; }
+.factor-row { display:flex; gap:12px; padding-top:6px; border-top:1px solid #30363d; font-size:0.8em; color:#8b949e; }
+
+/* tables */
+table { width:100%; border-collapse:collapse; font-size:0.85em; margin-bottom:12px; }
+th { text-align:left; padding:6px 10px; color:#8b949e; border-bottom:1px solid #30363d; font-weight:500; }
+td { padding:5px 10px; border-bottom:1px solid #21262d; }
+tr:hover { background:#1c2129; }
+.bar { font-family:monospace; color:#58a6ff; font-size:0.75em; }
+
+/* alerts */
+.alerts { background:#161b22; border:1px solid #30363d; border-radius:8px; padding:12px; }
+.alerts li { padding:4px 0; font-size:0.85em; list-style:none; }
+.alert-warning { color:#d29922; }
+.alert-info { color:#58a6ff; }
+
+/* research */
+.research { margin-top:16px; font-size:0.8em; color:#8b949e; }
+.research a { color:#58a6ff; }
+</style>
+</head>
+<body>
+<div class="container">
+<h1>📊 Portfolio Dashboard — 2026-06-09T15:42:19</h1>
+
+<div class="summary">
+    <div class="metrics">
+        <div class="metric"><label>总资产</label><span>1,341,486 CNY</span></div>
+        <div class="metric"><label>持仓市值</label><span>817,294</span></div>
+        <div class="metric"><label>现金</label><span>524,192 (39.1%)</span></div>
+        <div class="metric"><label>浮动盈亏</label><span class="negative">-10.07%</span></div>
+        <div class="metric"><label>回撤占用</label><span class="warning-color">50.4%</span></div>
+        <div class="metric"><label>可动用</label><span>29.1%</span></div>
+        <div class="metric"><label>南向5日</label><span class="positive">77.7亿</span></div>
+        <div class="metric"><label>主力5日</label><span class="negative">-2438.9亿</span></div>
+    </div>
+</div>
+
+<h2>📈 持仓 (6 只)</h2>
+<div class="grid-6">
+    
+        <div class="card stop-warning">
+            <div class="card-header">
+                <span class="code">600941</span>
+                <span class="name">中国移动</span>
+                <span class="market">A股</span>
+            </div>
+            <div class="card-body">
+                <div class="metric-row">
+                    <div class="metric"><label>现价</label><span>95.86 CNY</span></div>
+                    <div class="metric"><label>成本</label><span>97.917</span></div>
+                    <div class="metric"><label>盈亏</label><span class="negative">-2.10%</span></div>
+                    <div class="metric"><label>仓位</label><span>10.7%</span></div>
+                </div>
+                <div class="metric-row">
+                    <div class="metric"><label>RSI14</label><span>40.79</span></div>
+                    <div class="metric"><label>KDJ-J</label><span>32.67</span></div>
+                    <div class="metric"><label>5/20/60d</label><span>-2.65%/-4.71%/-0.21%</span></div>
+                    <div class="metric"><label>趋势</label><span>震荡分歧</span></div>
+                </div>
+                <div class="metric-row">
+                    <div class="metric"><label>止损价</label><span>91.3</span></div>
+                    <div class="metric"><label>距止损</label><span class="">5.0%</span></div>
+                    <div class="metric"><label>加仓条件</label><span>4/5</span></div>
+                    <div class="metric"><label>止盈条件</label><span>1/4</span></div>
+                </div>
+                <div class="factor-row"><span>因子: 综合0.44</span><span>价值0.65</span><span>成长0.40</span><span>质量0.61</span><span>动量0.26</span></div>
+            </div>
+        </div>
+        <div class="card stop-triggered">
+            <div class="card-header">
+                <span class="code">01810</span>
+                <span class="name">小米集团-W</span>
+                <span class="market">港股</span>
+            </div>
+            <div class="card-body">
+                <div class="metric-row">
+                    <div class="metric"><label>现价</label><span>27.32 HKD</span></div>
+                    <div class="metric"><label>成本</label><span>34.1299</span></div>
+                    <div class="metric"><label>盈亏</label><span class="negative">-19.95%</span></div>
+                    <div class="metric"><label>仓位</label><span>12.3%</span></div>
+                </div>
+                <div class="metric-row">
+                    <div class="metric"><label>RSI14</label><span>57.32</span></div>
+                    <div class="metric"><label>KDJ-J</label><span>-6.74</span></div>
+                    <div class="metric"><label>5/20/60d</label><span>-4.48%/-13.22%/-18.12%</span></div>
+                    <div class="metric"><label>趋势</label><span>趋势偏弱</span></div>
+                </div>
+                <div class="metric-row">
+                    <div class="metric"><label>止损价</label><span>28.2</span></div>
+                    <div class="metric"><label>距止损</label><span class="negative">-3.1% ⚡已触发</span></div>
+                    <div class="metric"><label>加仓条件</label><span>3/5</span></div>
+                    <div class="metric"><label>止盈条件</label><span>1/4</span></div>
+                </div>
+                <div class="factor-row"><span>因子: 综合0.21</span><span>价值0.33</span><span>成长0.20</span><span>质量0.38</span><span>动量0.15</span></div>
+            </div>
+        </div>
+        <div class="card stop-safe">
+            <div class="card-header">
+                <span class="code">00700</span>
+                <span class="name">腾讯控股</span>
+                <span class="market">港股</span>
+            </div>
+            <div class="card-body">
+                <div class="metric-row">
+                    <div class="metric"><label>现价</label><span>457.0 HKD</span></div>
+                    <div class="metric"><label>成本</label><span>516.0</span></div>
+                    <div class="metric"><label>盈亏</label><span class="negative">-11.43%</span></div>
+                    <div class="metric"><label>仓位</label><span>8.8%</span></div>
+                </div>
+                <div class="metric-row">
+                    <div class="metric"><label>RSI14</label><span>71.42</span></div>
+                    <div class="metric"><label>KDJ-J</label><span>52.21</span></div>
+                    <div class="metric"><label>5/20/60d</label><span>-2.19%/0.94%/-16.39%</span></div>
+                    <div class="metric"><label>趋势</label><span>震荡分歧</span></div>
+                </div>
+                <div class="metric-row">
+                    <div class="metric"><label>止损价</label><span>400.0</span></div>
+                    <div class="metric"><label>距止损</label><span class="">14.2%</span></div>
+                    <div class="metric"><label>加仓条件</label><span>4/5</span></div>
+                    <div class="metric"><label>止盈条件</label><span>2/4</span></div>
+                </div>
+                <div class="factor-row"><span>因子: 综合0.53</span><span>价值0.40</span><span>成长0.60</span><span>质量0.85</span><span>动量0.19</span></div>
+            </div>
+        </div>
+        <div class="card stop-warning">
+            <div class="card-header">
+                <span class="code">560860</span>
+                <span class="name">工业有色ETF万家</span>
+                <span class="market">A股</span>
+            </div>
+            <div class="card-body">
+                <div class="metric-row">
+                    <div class="metric"><label>现价</label><span>1.598 CNY</span></div>
+                    <div class="metric"><label>成本</label><span>1.8277</span></div>
+                    <div class="metric"><label>盈亏</label><span class="negative">-12.57%</span></div>
+                    <div class="metric"><label>仓位</label><span>13.1%</span></div>
+                </div>
+                <div class="metric-row">
+                    <div class="metric"><label>RSI14</label><span>75.06</span></div>
+                    <div class="metric"><label>KDJ-J</label><span>6.99</span></div>
+                    <div class="metric"><label>5/20/60d</label><span>-8.21%/-12.05%/-16.64%</span></div>
+                    <div class="metric"><label>趋势</label><span>趋势偏弱</span></div>
+                </div>
+                <div class="metric-row">
+                    <div class="metric"><label>止损价</label><span>1.51</span></div>
+                    <div class="metric"><label>距止损</label><span class="">5.8%</span></div>
+                    <div class="metric"><label>加仓条件</label><span>3/5</span></div>
+                    <div class="metric"><label>止盈条件</label><span>2/4</span></div>
+                </div>
+                
+            </div>
+        </div>
+        <div class="card stop-urgent">
+            <div class="card-header">
+                <span class="code">601006</span>
+                <span class="name">大秦铁路</span>
+                <span class="market">A股</span>
+            </div>
+            <div class="card-body">
+                <div class="metric-row">
+                    <div class="metric"><label>现价</label><span>5.1 CNY</span></div>
+                    <div class="metric"><label>成本</label><span>5.3</span></div>
+                    <div class="metric"><label>盈亏</label><span class="negative">-3.77%</span></div>
+                    <div class="metric"><label>仓位</label><span>11.4%</span></div>
+                </div>
+                <div class="metric-row">
+                    <div class="metric"><label>RSI14</label><span>18.85</span></div>
+                    <div class="metric"><label>KDJ-J</label><span>15.71</span></div>
+                    <div class="metric"><label>5/20/60d</label><span>-1.35%/-5.89%/-3.4%</span></div>
+                    <div class="metric"><label>趋势</label><span>趋势偏弱</span></div>
+                </div>
+                <div class="metric-row">
+                    <div class="metric"><label>止损价</label><span>5.02</span></div>
+                    <div class="metric"><label>距止损</label><span class="">1.6%</span></div>
+                    <div class="metric"><label>加仓条件</label><span>3/5</span></div>
+                    <div class="metric"><label>止盈条件</label><span>1/4</span></div>
+                </div>
+                <div class="factor-row"><span>因子: 综合0.42</span><span>价值0.72</span><span>成长0.55</span><span>质量0.40</span><span>动量0.31</span></div>
+            </div>
+        </div>
+        <div class="card stop-warning">
+            <div class="card-header">
+                <span class="code">513180</span>
+                <span class="name">恒生科技ETF</span>
+                <span class="market">场内基金</span>
+            </div>
+            <div class="card-body">
+                <div class="metric-row">
+                    <div class="metric"><label>现价</label><span>0.61 CNY</span></div>
+                    <div class="metric"><label>成本</label><span>0.617</span></div>
+                    <div class="metric"><label>盈亏</label><span class="negative">-1.13%</span></div>
+                    <div class="metric"><label>仓位</label><span>4.5%</span></div>
+                </div>
+                <div class="metric-row">
+                    <div class="metric"><label>RSI14</label><span>54.04</span></div>
+                    <div class="metric"><label>KDJ-J</label><span>1.89</span></div>
+                    <div class="metric"><label>5/20/60d</label><span>-6.44%/-5.43%/-6.73%</span></div>
+                    <div class="metric"><label>趋势</label><span>趋势偏弱</span></div>
+                </div>
+                <div class="metric-row">
+                    <div class="metric"><label>止损价</label><span>0.59</span></div>
+                    <div class="metric"><label>距止损</label><span class="">3.4%</span></div>
+                    <div class="metric"><label>加仓条件</label><span>3/5</span></div>
+                    <div class="metric"><label>止盈条件</label><span>1/4</span></div>
+                </div>
+                
+            </div>
+        </div>
+</div>
+
+<h2>👀 观察池 (4 只)</h2>
+<div class="grid-6">
+    
+        <div class="card watch">
+            <div class="card-header">
+                <span class="code">603223</span>
+                <span class="name">恒通股份</span>
+                <span class="timing">🔴</span>
+            </div>
+            <div class="card-body">
+                <div class="metric-row">
+                    <div class="metric"><label>现价</label><span>9.21</span></div>
+                    <div class="metric"><label>RSI</label><span>43.33</span></div>
+                    <div class="metric"><label>KDJ-J</label><span>-3.91</span></div>
+                    <div class="metric"><label>买入时机</label><span>1</span></div>
+                </div>
+                <div class="metric-row">
+                    <div class="metric"><label>5/20d</label><span>-8.0%/-5.61%</span></div>
+                    <div class="metric"><label>目标区间</label><span>8.80-9.10</span></div>
+                    <div class="metric" style="grid-column: span 2"><label>理由</label><span>五层漏斗连续4期top1，PE20不到行业一半，一致预期+60~80%，回购+股东集中，等回调MA20约9.0附近</span></div>
+                </div>
+            </div>
+        </div>
+        <div class="card watch">
+            <div class="card-header">
+                <span class="code">600188</span>
+                <span class="name">兖矿能源</span>
+                <span class="timing">🟢</span>
+            </div>
+            <div class="card-body">
+                <div class="metric-row">
+                    <div class="metric"><label>现价</label><span>24.7</span></div>
+                    <div class="metric"><label>RSI</label><span>56.3</span></div>
+                    <div class="metric"><label>KDJ-J</label><span>57.8</span></div>
+                    <div class="metric"><label>买入时机</label><span>4</span></div>
+                </div>
+                <div class="metric-row">
+                    <div class="metric"><label>5/20d</label><span>3.81%/12.39%</span></div>
+                    <div class="metric"><label>目标区间</label><span>待站上MA20确认后入场</span></div>
+                    <div class="metric" style="grid-column: span 2"><label>理由</label><span>煤炭行业苏醒中（广度26.7%、苏醒分0.51），兖矿20日+12.6%领涨板块，RSI 53.9温和未过热，PE便宜，</span></div>
+                </div>
+            </div>
+        </div>
+        <div class="card watch">
+            <div class="card-header">
+                <span class="code">518880</span>
+                <span class="name">华安黄金ETF</span>
+                <span class="timing">🟡</span>
+            </div>
+            <div class="card-body">
+                <div class="metric-row">
+                    <div class="metric"><label>现价</label><span>9.005</span></div>
+                    <div class="metric"><label>RSI</label><span>61.52</span></div>
+                    <div class="metric"><label>KDJ-J</label><span>12.0</span></div>
+                    <div class="metric"><label>买入时机</label><span>3</span></div>
+                </div>
+                <div class="metric-row">
+                    <div class="metric"><label>5/20d</label><span>-4.3%/-8.17%</span></div>
+                    <div class="metric"><label>目标区间</label><span>等金价回调至4400以下或站回MA20确认右侧</span></div>
+                    <div class="metric" style="grid-column: span 2"><label>理由</label><span>黄金板块苏醒分全市场最高（0.60），但金价受美联储鹰派+美债收益率压制仍在探底（COMEX 4570，距支撑4375约</span></div>
+                </div>
+            </div>
+        </div>
+        <div class="card watch">
+            <div class="card-header">
+                <span class="code">600900</span>
+                <span class="name">长江电力</span>
+                <span class="timing">🟢</span>
+            </div>
+            <div class="card-body">
+                <div class="metric-row">
+                    <div class="metric"><label>现价</label><span>27.63</span></div>
+                    <div class="metric"><label>RSI</label><span>48.56</span></div>
+                    <div class="metric"><label>KDJ-J</label><span>43.82</span></div>
+                    <div class="metric"><label>买入时机</label><span>4</span></div>
+                </div>
+                <div class="metric-row">
+                    <div class="metric"><label>5/20d</label><span>-1.18%/2.75%</span></div>
+                    <div class="metric"><label>目标区间</label><span>26.50-27.20</span></div>
+                    <div class="metric" style="grid-column: span 2"><label>理由</label><span>6/5 全部止盈卖出2000股@28，盈利+7246元（+15%）。RSI 77过热+KDJ回落，获利了结。等回调至MA</span></div>
+                </div>
+            </div>
+        </div>
+</div>
+
+<div class="grid-2">
+    <div>
+        <h2>🔥 行业动量 Top 10</h2>
+        <table>
+            <tr><th>#</th><th>行业</th><th>状态</th><th>广度</th><th>20日</th><th>RSI</th><th>PE</th><th>动量</th></tr>
+            
+        <tr>
+            <td>1</td>
+            <td>港口</td>
+            <td>📈改善</td>
+            <td>83.3%</td>
+            <td>-4.2%</td>
+            <td>51.3</td>
+            <td>15.1</td>
+            <td><span class="bar">█████████░░░░░░</span> 0.619</td>
+        </tr>
+        <tr>
+            <td>2</td>
+            <td>出版业</td>
+            <td>📈改善</td>
+            <td>87.5%</td>
+            <td>-4.2%</td>
+            <td>45.5</td>
+            <td>11.2</td>
+            <td><span class="bar">█████████░░░░░░</span> 0.610</td>
+        </tr>
+        <tr>
+            <td>3</td>
+            <td>医药商业</td>
+            <td>📈改善</td>
+            <td>100.0%</td>
+            <td>-8.8%</td>
+            <td>53.3</td>
+            <td>16.8</td>
+            <td><span class="bar">████████░░░░░░░</span> 0.588</td>
+        </tr>
+        <tr>
+            <td>4</td>
+            <td>食品</td>
+            <td>📈改善</td>
+            <td>66.7%</td>
+            <td>-8.0%</td>
+            <td>63.9</td>
+            <td>24.3</td>
+            <td><span class="bar">████████░░░░░░░</span> 0.588</td>
+        </tr>
+        <tr>
+            <td>5</td>
+            <td>仓储物流</td>
+            <td>📈改善</td>
+            <td>85.7%</td>
+            <td>-8.7%</td>
+            <td>53.4</td>
+            <td>15.0</td>
+            <td><span class="bar">███████░░░░░░░░</span> 0.529</td>
+        </tr>
+        <tr>
+            <td>6</td>
+            <td>中成药</td>
+            <td>📈改善</td>
+            <td>100.0%</td>
+            <td>-9.8%</td>
+            <td>48.1</td>
+            <td>21.2</td>
+            <td><span class="bar">███████░░░░░░░░</span> 0.521</td>
+        </tr>
+        <tr>
+            <td>7</td>
+            <td>路桥</td>
+            <td>📈改善</td>
+            <td>69.2%</td>
+            <td>-1.6%</td>
+            <td>40.6</td>
+            <td>12.1</td>
+            <td><span class="bar">███████░░░░░░░░</span> 0.519</td>
+        </tr>
+        <tr>
+            <td>8</td>
+            <td>建筑工程</td>
+            <td>📈改善</td>
+            <td>85.7%</td>
+            <td>-9.9%</td>
+            <td>51.7</td>
+            <td>15.1</td>
+            <td><span class="bar">███████░░░░░░░░</span> 0.518</td>
+        </tr>
+        <tr>
+            <td>9</td>
+            <td>环境保护</td>
+            <td>📈改善</td>
+            <td>100.0%</td>
+            <td>-10.4%</td>
+            <td>52.0</td>
+            <td>13.4</td>
+            <td><span class="bar">███████░░░░░░░░</span> 0.510</td>
+        </tr>
+        <tr>
+            <td>10</td>
+            <td>服饰</td>
+            <td>📈改善</td>
+            <td>66.7%</td>
+            <td>-10.0%</td>
+            <td>57.8</td>
+            <td>13.7</td>
+            <td><span class="bar">███████░░░░░░░░</span> 0.499</td>
+        </tr>
+        </table>
+
+        <h2>⚡ 苏醒雷达</h2>
+        <table>
+            <tr><th>行业</th><th>标签</th><th>苏醒分</th><th>20日</th><th>广度</th><th>领涨MA20</th><th>改善%</th></tr>
+            
+        <tr>
+            <td>纺织</td>
+            <td>⚡关注</td>
+            <td>0.595</td>
+            <td>-16.0%</td>
+            <td>20.0%</td>
+            <td>100.0%</td>
+            <td>100.0%</td>
+        </tr>
+        </table>
+    </div>
+    <div>
+        <h2>🔄 周期判断</h2>
+        <table>
+            <tr><th>风格</th><th>强度</th><th>得分</th><th>代表资产</th></tr>
+            <tr><td colspan="4">无数据</td></tr>
+        </table>
+
+        <h2>⚠️ 告警</h2>
+        <div class="alerts"><ul><li class="alert-warning">WARNING: 01810 小米集团-W 当前价 27.32 已进入止损预警区 28.2，需复核买入逻辑和趋势。</li></ul></div>
+
+        <h2>📰 宏观要闻</h2>
+        <div class="alerts"><ul><li>通胀冲向4%，债市逼沃什亮剑：敢不敢对特朗普说“不”？</li><li>沪指收复4000点，创业板涨超3%，芯片半导体集体爆发，恒科指涨逾1%，科网股反弹，“双焦”大跌，焦煤跌停</li><li>阿斯利康加入减肥药赛道：口服药减重11.8%</li><li>张瑜：五问“厄尔尼诺”</li><li>烧掉1万亿美元后，美国公司开始给DeepSeek充值</li></ul></div>
+    </div>
+</div>
+
+<div class="research" style="margin-top:24px">
+    <p>Dashboard generated at 2026-06-09T15:43:34</p>
+</div>
+</div>
+</body>
+</html>

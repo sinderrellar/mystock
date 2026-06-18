@@ -1,0 +1,128 @@
+# 轻资产成长 — 生意模式配置
+# 利润跟着技术/用户/管线走，PE 天然高
+# 看 PEG + 收入增速 + 研发投入
+
+pool:
+  pe_min: 0
+  pe_max: 200
+  min_amount: 50000000
+  min_market_cap: 5000000000
+
+factor_weights:
+  value: 0.10
+  growth: 0.45
+  quality: 0.25
+  momentum: 0.20
+
+scoring:
+  # 价值因子（成长股 PE/PB 天然高，放宽）
+  pe:
+    excellent: 20             # PE<20 → 1.0分
+    good: 35                  # PE<35 → 0.8分
+    average: 50               # PE<50 → 0.6分
+    high: 80                  # PE<80 → 0.4分  成长股 PE 50+是常态
+  pb:
+    excellent: 3.0            # PB<3.0 → 1.0分
+    good: 5.0                 # PB<5.0 → 0.8分
+    average: 8.0              # PB<8.0 → 0.6分
+    high: 12.0                # PB<12.0 → 0.4分
+  dividend_yield:
+    excellent: 3.0            # 成长股不靠股息，阈值低
+    very_good: 2.0
+    good: 1.0
+    average: 0.5
+
+  # 成长因子（收紧，这是成长股核心）
+  revenue_growth:
+    excellent: 30             # >30% → 1.0分  高成长
+    good: 20                  # >20% → 0.8分
+    average: 15               # >15% → 0.6分
+    low: 5                    # >5% → 0.4分
+  profit_growth:
+    excellent: 30             # >30% → 1.0分
+    good: 20                  # >20% → 0.8分
+    average: 10               # >10% → 0.6分
+    low: 0                    # >0% → 0.4分
+  forecast_growth:
+    excellent: 30             # >30% → 1.0分
+    good: 20                  # >20% → 0.8分
+    average: 10               # >10% → 0.6分
+    low: 0                    # >0% → 0.4分
+
+  # 质量因子（成长股质量要求高）
+  roe:
+    excellent: 25             # >25% → 1.0分
+    very_good: 20             # >20% → 0.8分
+    good: 15                  # >15% → 0.7分
+    average: 12               # >12% → 0.5分
+    below_avg: 8              # >8% → 0.3分
+  gross_margin:
+    excellent: 60             # >60% → 1.0分
+    very_good: 50             # >50% → 0.8分
+    good: 40                  # >40% → 0.7分
+    average: 30               # >30% → 0.5分
+    below_avg: 20             # >20% → 0.3分
+  debt_ratio:
+    excellent: 20
+    very_good: 35
+    good: 50
+    average: 60
+    below_avg: 70
+  ocf_to_net_income:
+    excellent: 1.5            # 成长股现金流要求更高
+    very_good: 1.0
+    good: 0.8
+    average: 0.5
+    below_avg: 0.3
+
+  # 动量因子
+  return_1m:
+    excellent: 10
+    good: 5
+    average: 0
+    negative: -5
+  return_3m:
+    excellent: 20
+    good: 10
+    average: 0
+    negative: -10
+  return_6m:
+    excellent: 30
+    good: 15
+    average: 0
+    negative: -15
+  return_12m:
+    excellent: 40
+    good: 20
+    average: 0
+    negative: -20
+  reversal_weight: 0.3        # 成长股偏追涨，反转权重低
+
+signals:
+  cheap:
+    metric: "peg"
+    green: 0.5
+    yellow: 1.0
+  business:
+    metric: "revenue_growth"
+    green: 15
+  expectation:
+    metric: "forecast_profit"
+    green: 20
+    yellow: 10
+  money:
+    metric: "moneyflow"
+    green: 0
+
+funnel:
+  layer1:
+    quality_min: 0.50
+  layer2_momentum:
+    momentum_min: 0.50
+    rsi_min: 35
+    rsi_max: 70
+  layer2_cycle:
+    quality_min: 0.55
+  layer3_entry:
+    entry_green: 0.70
+    entry_yellow: 0.45

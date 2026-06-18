@@ -1,0 +1,185 @@
+# 手动持仓配置文件
+# 说明：
+# - 你只需要维护账户现金、持仓数量、成本价、买入逻辑和风控条件。
+# - current_price 不需要每天填写；系统会尽量自动查价。
+# - 如果自动查价失败，系统会用 cost_price 临时估算仓位，并在报告中提示价格未确认。
+
+account:
+  broker: "平安证券" # 券商名称，仅用于展示
+  base_currency: "CNY" # 统计总资产时使用的基础币种
+  total_assets: 1341486 # 可选：券商显示的账户总资产；填了以后系统会以它为准，并反推现金。2026-05-31 追加30w现金
+  cash: null # 可选兼容字段；只有不填 total_assets 且不填 cash_by_currency 时才会使用
+  cash_by_currency: # 可选：各币种现金余额；没有券商API，所以现金仍需手动填
+    CNY: None # 人民币现金
+    HKD: None # 港币现金
+  fx_rates_to_base: # 汇率配置；写 auto 表示系统尝试实时查询，失败时使用内置兜底汇率
+    CNY: 1 # 人民币兑人民币
+    HKD: auto # 港币折人民币，自动查询；也可以手动写 0.92
+    USD: auto # 美元折人民币，自动查询；也可以手动写 7.2
+  risk_profile: "aggressive" # 风险偏好：conservative保守, balanced均衡/稳健, aggressive激进
+  target:
+    max_single_position_pct: 25 # 单只股票/ETF最大仓位比例，超过后系统会提示不再加仓或考虑降集中度
+    max_industry_position_pct: 30 # 单个行业最大仓位比例，超过后系统会提示行业过度集中
+    min_cash_pct: 10 # 最低现金比例，低于该比例时系统会提示控制新增买入
+    profit_target_pct: 30 # 一轮交易或持仓计划的目标盈利比例
+    max_drawdown_pct: 20 # 你能接受的最大回撤比例，用于生成默认止损/风险判断
+    strategy_goal: "进攻增长" # 当前账户目标：稳健盈利, 波段增强, 进攻增长, 防守保值
+
+positions: # 当前真实持仓列表
+  - code: "600941" # 股票/ETF代码，必须加引号，避免 0 开头代码被 YAML 吃掉
+    name: "中国移动" # 股票/ETF名称
+    market: "A股" # 交易市场：A股, 港股, 美股, 场内基金
+    asset_type: "stock" # 资产类型：stock股票, etf场内ETF, fund基金, bond债券, cash现金类
+    currency: "CNY" # 交易币种：CNY人民币, HKD港币, USD美元
+    quantity: 1800 # 持仓数量（原1500+2026-06-17加仓300@92.70）
+    cost_price: 95.213 # 加权均价：(1500×95.716 + 300×92.70) / 1800
+    allow_akshare_price_fallback: false # 是否允许 AKShare 作为行情兜底；默认 false，避免代理环境下报错很长
+    industry: "通信运营商" # 所属行业/主题，用于统计行业暴露
+    industry_code: "电信运营" # 映射到MongoDB行业编码，用于查询同行业参照标的
+    style: "红利防御" # 这只资产在组合中的角色，如红利防御、科技成长、资源周期、指数配置
+    thesis: "高股息运营商龙头，作为组合中的红利防御和现金流底仓。2026-06-05 已收2025末期分红2.2012元/股（免税），全年股息5.27港元+3.5%YoY。" # 买入逻辑/持仓理由，用于判断是否还值得继续持有
+    intended_holding_period: "medium" # 计划持有节奏：short短线, swing波段, medium中线, long长期；只是辅助字段
+    stop_loss_price: 88.68 # 动态止损：60日最低90.49下方2%（除权后更新 2026-06-17）
+    take_profit_price: 123.78 # 止盈价 = 加权均价95.213×1.30（2026-06-17加仓后更新）
+    invalid_conditions: # 买入逻辑失效条件；出现这些情况时，即使没到止损价也要重新评估
+      - "高股息逻辑削弱，分红预期明显下降"
+      - "通信运营商板块跌破中期趋势且无法修复"
+      - "单票仓位超过组合上限后不再加仓"
+
+  - code: "01810"
+    name: "小米集团-W"
+    market: "港股"
+    asset_type: "stock"
+    currency: "HKD"
+    quantity: 7000
+    cost_price: 34.1299
+    industry: "消费电子"
+    style: "科技成长"
+    thesis: "手机、AIoT 与智能汽车共同驱动的港股成长资产，弹性高于红利底仓。"
+    intended_holding_period: "swing"
+    stop_loss_price: 25.00 # E2E建议下移：技术支撑区，跌破则有效破位
+    take_profit_price: 44.37 # 止盈价 = 成本价×1.30，基于组合30%盈利目标
+    invalid_conditions:
+      - "智能汽车或手机业务增长预期明显下修"
+      - "港股科技成长风格持续走弱"
+      - "股价跌破关键支撑后无法收复"
+
+  - code: "00700"
+    name: "腾讯控股"
+    market: "港股"
+    asset_type: "stock"
+    currency: "HKD"
+    quantity: 400
+    cost_price: 501
+    industry: "互联网"
+    style: "港股核心资产"
+    thesis: "港股互联网核心资产，兼具利润韧性、回购支撑和 AI/游戏业务弹性。"
+    intended_holding_period: "medium"
+    stop_loss_price: 400.00 # 430止损已触发，下调至心理整数关口+历史支撑
+    add_price: 487.00 # 右侧加仓：站上MA20+RSI>35后
+    take_profit_price: 670.80 # 止盈价 = 成本价×1.30，基于组合30%盈利目标
+    invalid_conditions:
+      - "互联网平台监管或基本面预期明显转弱"
+      - "游戏、广告或金融科技业务增长明显低于预期"
+      - "港股核心资产风格持续失血"
+
+  - code: "560860"
+    name: "工业有色ETF万家"
+    market: "A股"
+    asset_type: "etf"
+    currency: "CNY"
+    quantity: 110000
+    cost_price: 1.8277
+    industry: "工业有色"
+    style: "资源周期"
+    thesis: "有色金属周期配置工具，用 ETF 分散单一个股风险，捕捉资源周期弹性。"
+    intended_holding_period: "swing"
+    stop_loss_price: 1.40 # E2E建议下移：前低区域，给宏观波动留空间
+    take_profit_price: 2.376 # 止盈价 = 成本价×1.30，基于组合30%盈利目标
+    invalid_conditions:
+      - "有色金属价格周期明显转弱"
+      - "美元走强或流动性收紧压制资源品"
+      - "ETF 跌破关键趋势后无法修复"
+
+  - code: "601006" # 股票/ETF代码，必须加引号，避免 0 开头代码被 YAML 吃掉
+    name: "大秦铁路" # 股票/ETF名称
+    market: "A股" # 交易市场：A股, 港股, 美股, 场内基金
+    asset_type: "stock" # 资产类型：stock股票, etf场内ETF, fund基金, bond债券, cash现金类
+    currency: "CNY" # 交易币种：CNY人民币, HKD港币, USD美元
+    quantity: 30000 # 05/28 加仓10000股@5.16，总成本均价5.30
+    cost_price: 5.30 # 加权平均：(5.28×1w + 5.46×1w + 5.16×1w) / 3w
+    allow_akshare_price_fallback: false # 是否允许 AKShare 作为行情兜底；默认 false，避免代理环境下报错很长
+    industry: "铁路运输" # 所属行业/主题，用于统计行业暴露
+    style: "红利防御" # 这只资产在组合中的角色，如红利防御、科技成长、资源周期、指数配置
+    thesis: "煤炭运输铁路龙头，货运量稳定、分红持续，作为组合中的红利防御和现金流底仓。" # 买入逻辑/持仓理由，用于判断是否还值得继续持有
+    intended_holding_period: "medium" # 计划持有节奏：short短线, swing波段, medium中线, long长期；只是辅助字段
+    stop_loss_price: 4.80 # E2E建议下移：技术支撑区，跌破则有效破位
+    add_price: 5.05 # 新成本5.30×0.95
+    trim_price: 6.36 # 新成本5.30×1.20
+    take_profit_price: 6.89 # 新成本5.30×1.30
+    invalid_conditions: # 买入逻辑失效条件；出现这些情况时，即使没到止损价也要重新评估
+      - "煤炭货运量持续下滑，铁路运输需求明显萎缩"
+      - "分红政策明显下调或取消，高股息逻辑削弱"
+      - "铁路运输板块跌破中期趋势且无法修复"
+      - "单票仓位超过组合上限后不再加仓"
+
+  - code: "513180"
+    name: "恒生科技ETF"
+    market: "场内基金"
+    asset_type: "etf"
+    currency: "CNY"
+    quantity: 100000
+    cost_price: 0.617
+    industry: "港股科技"
+    style: "科技成长"
+    thesis: "港股科技超跌反弹战术仓，ETF分散个险，KDJ J=27近超卖+融资持续净流入，博板块反弹而非个股alpha。"
+    intended_holding_period: "swing"
+    stop_loss_price: 0.590 # 动态止损：60日最低0.6下方2%，取整0.59
+    take_profit_price: 0.802
+
+watchlist: # 观察池，还没买但想跟踪的资产
+  - code: "603223"
+    name: "恒通股份"
+    market: "A股"
+    asset_type: "stock"
+    currency: "CNY"
+    industry: "化工物流"
+    style: "周期成长"
+    reason: "五层漏斗连续4期top1，PE20不到行业一半，一致预期+60~80%，回购+股东集中，等回调MA20约9.0附近"
+    target_buy_zone: "8.80-9.10"
+
+  - code: "600188"
+    name: "兖矿能源"
+    market: "A股"
+    asset_type: "stock"
+    currency: "CNY"
+    industry: "煤炭开采"
+    style: "资源周期"
+    reason: "煤炭行业苏醒中（广度26.7%、苏醒分0.51），兖矿20日+12.6%领涨板块，RSI 53.9温和未过热，PE便宜，离MA20近即将右侧确认。与现有大秦铁路形成煤企+煤运呼应。"
+    target_buy_zone: "待站上MA20确认后入场"
+
+  - code: "518880"
+    name: "华安黄金ETF"
+    market: "A股"
+    asset_type: "etf"
+    currency: "CNY"
+    industry: "黄金"
+    style: "资源周期"
+    reason: "黄金板块苏醒分全市场最高（0.60），但金价受美联储鹰派+美债收益率压制仍在探底（COMEX 4570，距支撑4375约4%）。ETF直接跟踪金价，跳过个股经营风险（如山东黄金产量-19%、高负债）。等金价确认守稳4375支撑或美联储6月会议落地后入场。"
+    target_buy_zone: "等金价回调至4400以下或站回MA20确认右侧"
+
+  - code: "600900"
+    name: "长江电力"
+    market: "A股"
+    asset_type: "stock"
+    currency: "CNY"
+    industry: "电力"
+    style: "红利防御"
+    reason: "6/5 全部止盈卖出2000股@28，盈利+7246元（+15%）。RSI 77过热+KDJ回落，获利了结。等回调至MA60(27.0)-MA20(27.2)附近再考虑接回。"
+    target_buy_zone: "26.50-27.20"
+
+notes:
+  - "只需要录入成本价，current_price 可以不填；系统会尽量自动查价。"
+  - "如果自动查价失败，系统会临时使用 cost_price 估算仓位，并在结果中标记价格不可用。"
+  - "港股和 ETF 会按 fx_rates_to_base 折算到基础币种。"
+  - "thesis 和 invalid_conditions 很重要，用于判断买入逻辑是否仍然成立。"

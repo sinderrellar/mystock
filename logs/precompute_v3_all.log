@@ -1,0 +1,13 @@
+python3: can't open file '/data/stock_recommender_system/scripts/python3': [Errno 2] No such file or directory
+nohup: ignoring input
+python3: can't open file '/data/stock_recommender_system/scripts/python3': [Errno 2] No such file or directory
+nohup: ignoring input
+预计算 v3: 2026-06-16 → 2026-06-16 (1 天) | meta+trends+factors | workers=1
+  [2026-06-16] 开始...
+
+完成: 0/1 天, meta=0 trends=0 factors=0
+nohup: ignoring input
+预计算 v3: 2026-06-16 → 2026-06-16 (1 天) | meta+trends+factors | workers=1
+  [2026-06-16] 开始...
+
+完成: 0/1 天, meta=0 trends=0 factors=0
