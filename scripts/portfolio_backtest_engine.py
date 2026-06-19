@@ -218,6 +218,101 @@ class PortfolioBacktestEngine:
 
         return self._build_report(vp, all_trades, days_processed, total_orders_executed)
 
+    def run_with_daily_results(
+        self,
+        daily_results: Dict[str, Dict[str, Any]],
+        verbose: bool = True,
+    ) -> Dict[str, Any]:
+        """Run simulation using precomputed daily controller results.
+
+        `daily_results` is keyed by trade_date and must contain an `actions` list.
+        This is used by attribution so buy_plan is computed once per date and
+        reused across all modes.
+        """
+        vp = {
+            "cash": self.initial_cash,
+            "equity": self.initial_cash,
+            "max_equity": self.initial_cash,
+            "positions": {},
+            "pending_orders": [],
+            "history": [],
+        }
+        all_trades: List[Dict] = []
+        days_processed = 0
+        total_orders_executed = 0
+
+        if not self._trading_days:
+            return {"error": f"无数据 ({self.start_date}~{self.end_date})"}
+
+        for i, date in enumerate(self._trading_days):
+            if verbose:
+                print(f"  [{i+1}/{len(self._trading_days)}] {date}", end=" ", flush=True)
+
+            executed = self._execute_pending(date, vp)
+            total_orders_executed += len(executed)
+            all_trades.extend(executed)
+            self._mark_to_market(date, vp)
+
+            result = daily_results.get(date, {})
+            actions = result.get("actions", [])
+            days_processed += 1
+
+            next_date = self._next_trading_day(date)
+            new_orders = 0
+            for a in actions:
+                if not next_date:
+                    break
+                if a["action"] == "OPEN":
+                    vp["pending_orders"].append({
+                        "execute_date": next_date,
+                        "code": a["code"],
+                        "side": "BUY",
+                        "target_weight": a.get("target_weight", 0),
+                        "industry": a.get("industry", ""),
+                    })
+                    new_orders += 1
+                elif a["action"] == "CLOSE":
+                    vp["pending_orders"].append({
+                        "execute_date": next_date,
+                        "code": a["code"],
+                        "side": "SELL",
+                    })
+                    new_orders += 1
+
+            positions_value = vp["equity"] - vp["cash"]
+            vp["history"].append({
+                "date": date,
+                "equity": round(vp["equity"], 2),
+                "cash": round(vp["cash"], 2),
+                "positions_value": round(positions_value, 2),
+                "position_pct": round(positions_value / vp["equity"], 4) if vp["equity"] > 0 else 0,
+                "drawdown": round(1 - vp["equity"] / max(vp["max_equity"], 1), 4),
+            })
+
+            if verbose:
+                print(f"— {len(actions)} actions | pos:{len(vp['positions'])} "
+                      f"pend:{len(vp['pending_orders'])} eq={vp['equity']:,.0f}")
+
+        final_date = self._trading_days[-1] if self._trading_days else None
+        if final_date:
+            for code, pos in list(vp["positions"].items()):
+                close = self.prices.get_close(code, final_date)
+                if close > 0:
+                    vp["cash"] += pos["shares"] * close
+                    ret = (close / pos["cost"] - 1) * 100 if pos["cost"] > 0 else 0
+                    all_trades.append({
+                        "code": code, "entry_date": pos.get("entry_date", ""),
+                        "exit_date": final_date, "exit_reason": "回测结束平仓",
+                        "buy_price": pos["cost"],
+                        "sell_price": close,
+                        "return_pct": round(ret, 2),
+                        "holding_days": 0,
+                    })
+            vp["positions"] = {}
+            vp["equity"] = vp["cash"]
+
+        return self._build_report(vp, all_trades, days_processed, total_orders_executed)
+
     # ================================================================
     # Execution Simulator
     # ================================================================
@@ -457,15 +552,45 @@ def run_attribution(
     initial_cash: float = 1_000_000,
     verbose: bool = False,
 ) -> Dict[str, Any]:
-    """Run staged attribution backtests on the same window and simulator."""
-    modes = ["baseline", "entry", "risk", "full"]
-    reports: Dict[str, Any] = {}
-    summaries: List[Dict[str, Any]] = []
+    """Run staged attribution backtests on the same window and simulator.
 
-    for mode in modes:
-        if verbose:
-            print(f"\n=== Attribution mode: {mode} ===")
-        engine = PortfolioBacktestEngine(
+    BuyPlan is computed once per date and reused across all modes.
+    """
+    from buy_plan import BuyPlanEngine
+    from portfolio_controller import build_backtest_actions
+
+    modes = ["baseline", "entry", "risk", "full"]
+    base_engine = PortfolioBacktestEngine(
+        start_date=start_date,
+        end_date=end_date,
+        budget=budget,
+        baseline_vol=baseline_vol,
+        top_n=top_n,
+        initial_cash=initial_cash,
+        mode="full",
+    )
+    if not base_engine._trading_days:
+        return {"error": f"无数据 ({start_date}~{end_date})"}
+
+    config_override = {
+        "max_risk_budget": budget,
+        "baseline_vol": baseline_vol,
+        "top_n": top_n,
+    }
+    mode_states = {
+        mode: {
+            "cash": initial_cash,
+            "equity": initial_cash,
+            "max_equity": initial_cash,
+            "positions": {},
+            "pending_orders": [],
+        }
+        for mode in modes
+    }
+    daily_results: Dict[str, Dict[str, Dict[str, Any]]] = {mode: {} for mode in modes}
+    bp_engine = BuyPlanEngine()
+    sim_engines = {
+        mode: PortfolioBacktestEngine(
             start_date=start_date,
             end_date=end_date,
             budget=budget,
@@ -474,7 +599,59 @@ def run_attribution(
             initial_cash=initial_cash,
             mode=mode,
         )
-        report = engine.run(verbose=verbose)
+        for mode in modes
+    }
+    bp_runs = 0
+
+    for i, date in enumerate(base_engine._trading_days):
+        if verbose:
+            print(f"  [{i+1}/{len(base_engine._trading_days)}] {date} buy_plan", flush=True)
+        bp_result = bp_engine.run(
+            top_n=top_n,
+            target_date=date,
+            initial_limit=5000,
+            enrich_limit=0,
+            apply_portfolio_penalty=False,
+        )
+        bp_runs += 1
+
+        for mode in modes:
+            sim_engine = sim_engines[mode]
+            # Bring the mode portfolio forward before generating same-day signals.
+            sim_engine._execute_pending(date, mode_states[mode])
+            sim_engine._mark_to_market(date, mode_states[mode])
+            daily_results[mode][date] = build_backtest_actions(
+                date=date,
+                virtual_portfolio=mode_states[mode],
+                bp_result=bp_result,
+                config_override=config_override,
+                attribution_mode=mode,
+            )
+
+            # Queue next-day orders so the state remains accurate for later dates.
+            next_date = sim_engine._next_trading_day(date)
+            if next_date:
+                for action in daily_results[mode][date].get("actions", []):
+                    if action["action"] == "OPEN":
+                        mode_states[mode]["pending_orders"].append({
+                            "execute_date": next_date,
+                            "code": action["code"],
+                            "side": "BUY",
+                            "target_weight": action.get("target_weight", 0),
+                            "industry": action.get("industry", ""),
+                        })
+                    elif action["action"] == "CLOSE":
+                        mode_states[mode]["pending_orders"].append({
+                            "execute_date": next_date,
+                            "code": action["code"],
+                            "side": "SELL",
+                        })
+
+    reports: Dict[str, Any] = {}
+    summaries: List[Dict[str, Any]] = []
+    for mode in modes:
+        engine = sim_engines[mode]
+        report = engine.run_with_daily_results(daily_results[mode], verbose=False)
         reports[mode] = report
         summaries.append(_summary_for_attribution(mode, report))
 
@@ -495,6 +672,12 @@ def run_attribution(
             "top_n": top_n,
             "initial_cash": initial_cash,
         },
+        "efficiency": {
+            "buy_plan_runs": bp_runs,
+            "mode_count": len(modes),
+            "trading_days": len(base_engine._trading_days),
+            "avoided_buy_plan_runs": max(0, len(modes) * len(base_engine._trading_days) - bp_runs),
+        },
         "summaries": summaries,
         "reports": reports,
     }
@@ -511,6 +694,9 @@ def format_attribution_report(result: Dict[str, Any]) -> str:
         "  entry    = baseline + entry gate",
         "  risk     = entry + risk gate + position multiplier",
         "  full     = entry + risk + sizing",
+        "",
+        f"计算复用: buy_plan 实跑 {result.get('efficiency', {}).get('buy_plan_runs', '?')} 次，"
+        f"避免重复 {result.get('efficiency', {}).get('avoided_buy_plan_runs', '?')} 次",
         "",
         f"{'mode':<10} {'收益':>8} {'vs_base':>8} {'最大回撤':>8} {'胜率':>8} {'交易':>6} {'均仓位':>8} {'订单':>6}",
         "-" * 92,

@@ -362,6 +362,7 @@ def run_backtest(
     config_override: Dict[str, Any] = None,
     use_controller: bool = False,
     attribution_mode: str = "full",
+    bp_result: Dict[str, Any] = None,
 ) -> Dict[str, Any]:
     """回测入口：全链路 buy_plan → entry → risk → sizing。
 
@@ -376,15 +377,44 @@ def run_backtest(
     - risk: entry + risk gate，等权仓位按 risk multiplier 缩放。
     - full: entry + risk + sizing，当前完整链路。
     """
-    from buy_plan import BuyPlanEngine
-    from risk_engine import evaluate as risk_eval
-
     config = config_override or {}
+    top_n = int(config.get("top_n", 10))
 
     # ── ① 候选池 ──
-    bp = BuyPlanEngine()
+    if bp_result is None:
+        from buy_plan import BuyPlanEngine
+        bp = BuyPlanEngine()
+        bp_result = bp.run(
+            top_n=top_n,
+            target_date=date,
+            initial_limit=5000,
+            enrich_limit=0,
+            apply_portfolio_penalty=False,
+        )
+
+    return build_backtest_actions(
+        date=date,
+        virtual_portfolio=virtual_portfolio,
+        bp_result=bp_result,
+        config_override=config,
+        attribution_mode=attribution_mode,
+    )
+
+
+def build_backtest_actions(
+    date: str,
+    virtual_portfolio: Dict[str, Any],
+    bp_result: Dict[str, Any],
+    config_override: Dict[str, Any] = None,
+    attribution_mode: str = "full",
+) -> Dict[str, Any]:
+    """用已计算好的 buy_plan 结果生成某个 attribution mode 的回测动作。
+
+    attribution 跑多模式时，同一天的 buy_plan 只需要计算一次；四个虚拟组合
+    共享同一份 `bp_result`，只在 portfolio state / risk / sizing 上分叉。
+    """
+    config = config_override or {}
     top_n = int(config.get("top_n", 10))
-    bp_result = bp.run(top_n=top_n, target_date=date, initial_limit=5000, enrich_limit=0)
     candidates = bp_result.get("recommendations", [])
 
     if not candidates:

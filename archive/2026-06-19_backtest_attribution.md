@@ -13,6 +13,11 @@
   - `--attribution`：一次跑四档贡献拆解。
   - `--save`：把 attribution 结果保存到 `reports/backtest_attribution_YYYY-MM-DD.json|md`。
 
+- attribution 性能优化：
+  - 同一个交易日只运行一次 `BuyPlanEngine.run()`。
+  - 四个 attribution mode 复用同一份当日候选池。
+  - `BuyPlanEngine.run()` 新增 `apply_portfolio_penalty=False`，回测时不再读取真实 `portfolio.yaml` 对历史候选降权。
+
 ## 为什么改
 
 之前只能看到完整链路的总回测结果，无法判断每一层到底有没有贡献：
@@ -44,6 +49,12 @@ python3 scripts/portfolio_backtest_engine.py --start 2026-03-02 --end 2026-06-17
 
 ```bash
 python3 scripts/portfolio_backtest_engine.py --start 2026-03-02 --end 2026-06-17 --attribution
+```
+
+输出中会显示：
+
+```text
+计算复用: buy_plan 实跑 N 次，避免重复 3N 次
 ```
 
 保存报告：

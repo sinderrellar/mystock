@@ -604,7 +604,11 @@ class BuyPlanEngine:
 
             industries: Optional[List[str]] = None,
 
-            target_date: Optional[str] = None) -> Dict[str, Any]:
+            target_date: Optional[str] = None,
+
+            apply_portfolio_penalty: bool = True,
+
+            portfolio_codes: Optional[set] = None) -> Dict[str, Any]:
 
         # 解析 "today" → 实际日期
 
@@ -774,9 +778,15 @@ class BuyPlanEngine:
 
         passed.sort(key=lambda x: x["alpha_score"], reverse=True)
 
-        # 已持仓降权
+        # 已持仓降权。回测 attribution 可关闭，避免真实 portfolio.yaml 污染历史回测。
 
-        portfolio_codes = self._get_portfolio_codes()
+        if apply_portfolio_penalty:
+
+            portfolio_codes = portfolio_codes if portfolio_codes is not None else self._get_portfolio_codes()
+
+        else:
+
+            portfolio_codes = set()
 
         for s in passed:
 
