@@ -12,6 +12,7 @@ Portfolio Backtest Engine — 组合回测引擎（v3 全链路）
 """
 
 import argparse
+import json
 import os
 import sys
 from collections import defaultdict
@@ -64,13 +65,15 @@ class PortfolioBacktestEngine:
 
     def __init__(self, start_date: str, end_date: str,
                  budget: float = 0.60, baseline_vol: float = 0.025,
-                 top_n: int = 10, initial_cash: float = 1_000_000):
+                 top_n: int = 10, initial_cash: float = 1_000_000,
+                 mode: str = "full"):
         self.start_date = start_date
         self.end_date = end_date
         self.budget = budget
         self.baseline_vol = baseline_vol
         self.top_n = top_n
         self.initial_cash = initial_cash
+        self.mode = mode
 
         config_path = os.path.join(PROJECT_ROOT, "config", "config_complete.yaml")
         config = _load_mongodb_config(config_path)
@@ -103,6 +106,7 @@ class PortfolioBacktestEngine:
         config_override = {
             "max_risk_budget": self.budget,
             "baseline_vol": self.baseline_vol,
+            "top_n": self.top_n,
         }
 
         # ── 初始化 virtual_portfolio ──
@@ -137,7 +141,8 @@ class PortfolioBacktestEngine:
 
             # ── ③ run_backtest ──
             try:
-                result = run_backtest(date, vp, config_override)
+                result = run_backtest(date, vp, config_override,
+                                      attribution_mode=self.mode)
             except Exception as e:
                 if verbose:
                     print(f"— 错误: {e}")
@@ -347,6 +352,7 @@ class PortfolioBacktestEngine:
 
         return {
             "days_processed": days,
+            "mode": self.mode,
             "orders_executed": orders_executed,
             "portfolio_summary": {
                 "initial_equity": init_equity,
@@ -376,7 +382,7 @@ def format_report(report: Dict[str, Any]) -> str:
     ps = report.get("portfolio_summary", {})
     lines = [
         "=" * 70,
-        f"组合回测报告 ({report['days_processed']} 个交易日)",
+        f"组合回测报告 ({report['days_processed']} 个交易日, mode={report.get('mode', 'full')})",
         "=" * 70,
         "",
         "── 组合概要 ──",
@@ -426,6 +432,123 @@ def format_report(report: Dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _summary_for_attribution(name: str, report: Dict[str, Any]) -> Dict[str, Any]:
+    ps = report.get("portfolio_summary", {})
+    return {
+        "mode": name,
+        "error": report.get("error"),
+        "days_processed": report.get("days_processed", 0),
+        "total_return_pct": ps.get("total_return_pct"),
+        "max_drawdown_pct": ps.get("max_drawdown_pct"),
+        "avg_position_pct": ps.get("avg_position_pct"),
+        "total_trades": ps.get("total_trades"),
+        "win_rate_pct": ps.get("win_rate_pct"),
+        "orders_executed": report.get("orders_executed", 0),
+        "final_equity": ps.get("final_equity"),
+    }
+
+
+def run_attribution(
+    start_date: str,
+    end_date: str,
+    budget: float = 0.60,
+    baseline_vol: float = 0.025,
+    top_n: int = 10,
+    initial_cash: float = 1_000_000,
+    verbose: bool = False,
+) -> Dict[str, Any]:
+    """Run staged attribution backtests on the same window and simulator."""
+    modes = ["baseline", "entry", "risk", "full"]
+    reports: Dict[str, Any] = {}
+    summaries: List[Dict[str, Any]] = []
+
+    for mode in modes:
+        if verbose:
+            print(f"\n=== Attribution mode: {mode} ===")
+        engine = PortfolioBacktestEngine(
+            start_date=start_date,
+            end_date=end_date,
+            budget=budget,
+            baseline_vol=baseline_vol,
+            top_n=top_n,
+            initial_cash=initial_cash,
+            mode=mode,
+        )
+        report = engine.run(verbose=verbose)
+        reports[mode] = report
+        summaries.append(_summary_for_attribution(mode, report))
+
+    base_return = summaries[0].get("total_return_pct")
+    for row in summaries:
+        if base_return is not None and row.get("total_return_pct") is not None:
+            row["return_delta_vs_baseline"] = round(row["total_return_pct"] - base_return, 2)
+        else:
+            row["return_delta_vs_baseline"] = None
+
+    return {
+        "type": "backtest_attribution",
+        "start_date": start_date,
+        "end_date": end_date,
+        "params": {
+            "budget": budget,
+            "baseline_vol": baseline_vol,
+            "top_n": top_n,
+            "initial_cash": initial_cash,
+        },
+        "summaries": summaries,
+        "reports": reports,
+    }
+
+
+def format_attribution_report(result: Dict[str, Any]) -> str:
+    lines = [
+        "=" * 92,
+        f"全链路回测贡献拆解 ({result.get('start_date')} → {result.get('end_date')})",
+        "=" * 92,
+        "",
+        "mode含义:",
+        "  baseline = buy_plan TopN 等权买入",
+        "  entry    = baseline + entry gate",
+        "  risk     = entry + risk gate + position multiplier",
+        "  full     = entry + risk + sizing",
+        "",
+        f"{'mode':<10} {'收益':>8} {'vs_base':>8} {'最大回撤':>8} {'胜率':>8} {'交易':>6} {'均仓位':>8} {'订单':>6}",
+        "-" * 92,
+    ]
+    for row in result.get("summaries", []):
+        if row.get("error"):
+            lines.append(f"{row['mode']:<10} ERROR: {row['error']}")
+            continue
+        lines.append(
+            f"{row['mode']:<10} "
+            f"{row.get('total_return_pct', 0):>7.2f}% "
+            f"{row.get('return_delta_vs_baseline', 0):>7.2f}% "
+            f"{row.get('max_drawdown_pct', 0):>7.2f}% "
+            f"{row.get('win_rate_pct', 0):>7.1f}% "
+            f"{row.get('total_trades', 0):>6} "
+            f"{row.get('avg_position_pct', 0):>7.1f}% "
+            f"{row.get('orders_executed', 0):>6}"
+        )
+    lines.append("=" * 92)
+    return "\n".join(lines)
+
+
+def save_attribution_report(result: Dict[str, Any]) -> Dict[str, str]:
+    """Save attribution JSON/MD into reports/ without committing generated output."""
+    reports_dir = os.path.join(PROJECT_ROOT, "reports")
+    os.makedirs(reports_dir, exist_ok=True)
+    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    base = os.path.join(reports_dir, f"backtest_attribution_{stamp}")
+    json_path = base + ".json"
+    md_path = base + ".md"
+    with open(json_path, "w", encoding="utf-8") as f:
+        json.dump(result, f, ensure_ascii=False, indent=2, default=str)
+    with open(md_path, "w", encoding="utf-8") as f:
+        f.write(format_attribution_report(result))
+        f.write("\n")
+    return {"json": json_path, "md": md_path}
+
+
 # ================================================================
 # CLI
 # ================================================================
@@ -441,24 +564,55 @@ def main():
     parser.add_argument("--baseline-vol", type=float, default=0.025,
                         help="baseline_vol 波动率归一基准 (默认 0.025)")
     parser.add_argument("--cash", type=float, default=1_000_000, help="初始资金")
+    parser.add_argument("--mode", choices=["baseline", "entry", "risk", "full"],
+                        default="full", help="单次回测模式")
+    parser.add_argument("--attribution", action="store_true",
+                        help="一次运行 baseline/entry/risk/full 四档贡献拆解")
+    parser.add_argument("--save", action="store_true",
+                        help="将 attribution 结果保存到 reports/backtest_attribution_YYYY-MM-DD.json|md")
     parser.add_argument("--json", action="store_true", help="输出 JSON")
     parser.add_argument("--quiet", action="store_true", help="静默模式")
     args = parser.parse_args()
 
+    if args.attribution:
+        if not args.quiet:
+            print(f"回测贡献拆解窗口: {args.start} → {args.end}")
+            print(f"参数: budget={args.budget}, baseline_vol={args.baseline_vol}, "
+                  f"top_n={args.top}, cash={args.cash:,.0f}")
+        result = run_attribution(
+            start_date=args.start,
+            end_date=args.end,
+            budget=args.budget,
+            baseline_vol=args.baseline_vol,
+            top_n=args.top,
+            initial_cash=args.cash,
+            verbose=not args.quiet,
+        )
+        if args.save:
+            paths = save_attribution_report(result)
+            result["saved_paths"] = paths
+            if not args.quiet:
+                print(f"\n已保存: {paths['md']}")
+                print(f"已保存: {paths['json']}")
+        if args.json:
+            print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
+        else:
+            print(format_attribution_report(result))
+        return
+
     engine = PortfolioBacktestEngine(
         start_date=args.start, end_date=args.end,
         budget=args.budget, baseline_vol=args.baseline_vol,
-        top_n=args.top, initial_cash=args.cash,
+        top_n=args.top, initial_cash=args.cash, mode=args.mode,
     )
 
     if not args.quiet:
         print(f"回测窗口: {args.start} → {args.end}")
         print(f"参数: budget={args.budget}, baseline_vol={args.baseline_vol}, "
-              f"top_n={args.top}, cash={args.cash:,.0f}")
+              f"top_n={args.top}, cash={args.cash:,.0f}, mode={args.mode}")
         print(f"可用交易日: {len(engine._trading_days)} 天")
         print()
 
-    import json
     report = engine.run(verbose=not args.quiet)
 
     if args.json:

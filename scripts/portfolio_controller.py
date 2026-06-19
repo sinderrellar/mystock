@@ -361,6 +361,7 @@ def run_backtest(
     virtual_portfolio: Dict[str, Any],
     config_override: Dict[str, Any] = None,
     use_controller: bool = False,
+    attribution_mode: str = "full",
 ) -> Dict[str, Any]:
     """回测入口：全链路 buy_plan → entry → risk → sizing。
 
@@ -368,6 +369,12 @@ def run_backtest(
     - pf_meta 从 virtual_portfolio 构造（而非 live portfolio_state_loader）
     - universe = candidates + current_positions（持仓股也重新评估）
     - 不调 controller.evaluate()（use_controller=False）
+
+    attribution_mode:
+    - baseline: buy_plan TopN 等权买入，不使用 entry/risk/sizing。
+    - entry: 仅使用 entry gate，等权仓位。
+    - risk: entry + risk gate，等权仓位按 risk multiplier 缩放。
+    - full: entry + risk + sizing，当前完整链路。
     """
     from buy_plan import BuyPlanEngine
     from risk_engine import evaluate as risk_eval
@@ -376,7 +383,8 @@ def run_backtest(
 
     # ── ① 候选池 ──
     bp = BuyPlanEngine()
-    bp_result = bp.run(top_n=10, target_date=date, initial_limit=5000, enrich_limit=0)
+    top_n = int(config.get("top_n", 10))
+    bp_result = bp.run(top_n=top_n, target_date=date, initial_limit=5000, enrich_limit=0)
     candidates = bp_result.get("recommendations", [])
 
     if not candidates:
@@ -445,6 +453,25 @@ def run_backtest(
 
     actions = []
     sum_target_weight = 0.0
+    baseline_weight = config.get("baseline_weight")
+    if baseline_weight is None:
+        baseline_weight = min(0.10, config.get("max_risk_budget", 0.60) / max(top_n, 1))
+
+    def _append_open(code: str, target_weight: float, entry_score: float,
+                     industry: str = "", reason: Any = None) -> None:
+        nonlocal sum_target_weight
+        if target_weight <= 0:
+            return
+        actions.append({
+            "code": code,
+            "action": "OPEN",
+            "target_weight": round(target_weight, 4),
+            "entry_score": entry_score,
+            "industry": industry,
+            "reason": reason or {},
+        })
+        sum_target_weight += target_weight
+
     for d in decisions:
         code = d["code"]
         action_type = d["entry_signal"]["action_type"]
@@ -454,6 +481,12 @@ def run_backtest(
         in_pending = code in pending_buy_codes
 
         if in_pending:
+            continue
+
+        if attribution_mode == "baseline":
+            if not in_position and code in existing_codes:
+                _append_open(code, baseline_weight, entry_score, d.get("industry", ""),
+                             {"mode": "baseline", "alpha_score": d.get("alpha_score")})
             continue
 
         if in_position:
@@ -466,16 +499,25 @@ def run_backtest(
                 })
             # 否则 HOLD（不操作）
         else:
-            # 非持仓股 OPEN
-            if action_type == "OPEN" and target_weight > 0:
-                actions.append({
-                    "code": code, "action": "OPEN",
-                    "target_weight": round(target_weight, 4),
-                    "entry_score": entry_score,
-                    "industry": d.get("industry", ""),
-                    "reason": d["sizing"].get("trace", {}),
-                })
-                sum_target_weight += target_weight
+            # 非持仓股 OPEN，按 attribution mode 逐层增加约束。
+            if action_type != "OPEN":
+                continue
+            if attribution_mode == "entry":
+                _append_open(code, baseline_weight, entry_score, d.get("industry", ""),
+                             {"mode": "entry"})
+            elif attribution_mode == "risk":
+                gate = d.get("risk_gate", {})
+                if gate.get("OPEN", False):
+                    _append_open(
+                        code,
+                        baseline_weight * gate.get("position_multiplier", 1.0),
+                        entry_score,
+                        d.get("industry", ""),
+                        {"mode": "risk", "position_multiplier": gate.get("position_multiplier")},
+                    )
+            elif attribution_mode == "full" and target_weight > 0:
+                _append_open(code, target_weight, entry_score, d.get("industry", ""),
+                             d["sizing"].get("trace", {}))
 
     # ── ⑦ 组合快照 ──
     snapshot = {
@@ -493,6 +535,7 @@ def run_backtest(
         "decisions": decisions,
         "breadth_pct": breadth_pct,
         "regime": regime,
+        "attribution_mode": attribution_mode,
     }
 
 
