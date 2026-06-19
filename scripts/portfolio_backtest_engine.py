@@ -527,7 +527,41 @@ def format_report(report: Dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def _summary_for_attribution(name: str, report: Dict[str, Any]) -> Dict[str, Any]:
+def _aggregate_daily_diagnostics(results: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
+    totals = defaultdict(int)
+    weighted = defaultdict(float)
+    weight_counts = defaultdict(int)
+    drop_reasons = defaultdict(int)
+
+    for result in results.values():
+        diag = result.get("diagnostics", {}) or {}
+        for key in (
+            "candidate_count", "decision_count", "new_decision_count",
+            "entry_open_count", "entry_block_count", "risk_open_count",
+            "risk_block_count", "sizing_positive_count", "sizing_zero_count",
+            "action_count",
+        ):
+            totals[key] += int(diag.get(key, 0) or 0)
+        for key in ("avg_target_weight", "avg_raw_weight", "avg_vol_norm"):
+            value = diag.get(key)
+            if isinstance(value, (int, float)):
+                weighted[key] += value
+                weight_counts[key] += 1
+        for reason, count in (diag.get("drop_reasons") or {}).items():
+            drop_reasons[reason] += int(count or 0)
+
+    out = dict(totals)
+    for key, value in weighted.items():
+        out[key] = round(value / max(weight_counts[key], 1), 4)
+    out["drop_reasons"] = dict(drop_reasons)
+    return out
+
+
+def _summary_for_attribution(
+    name: str,
+    report: Dict[str, Any],
+    diagnostics: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
     ps = report.get("portfolio_summary", {})
     return {
         "mode": name,
@@ -540,6 +574,7 @@ def _summary_for_attribution(name: str, report: Dict[str, Any]) -> Dict[str, Any
         "win_rate_pct": ps.get("win_rate_pct"),
         "orders_executed": report.get("orders_executed", 0),
         "final_equity": ps.get("final_equity"),
+        "diagnostics": diagnostics or {},
     }
 
 
@@ -649,11 +684,19 @@ def run_attribution(
 
     reports: Dict[str, Any] = {}
     summaries: List[Dict[str, Any]] = []
+    diagnostics_by_mode = {
+        mode: _aggregate_daily_diagnostics(daily_results[mode])
+        for mode in modes
+    }
     for mode in modes:
         engine = sim_engines[mode]
         report = engine.run_with_daily_results(daily_results[mode], verbose=False)
         reports[mode] = report
-        summaries.append(_summary_for_attribution(mode, report))
+        summaries.append(_summary_for_attribution(
+            mode,
+            report,
+            diagnostics_by_mode.get(mode, {}),
+        ))
 
     base_return = summaries[0].get("total_return_pct")
     for row in summaries:
@@ -679,6 +722,7 @@ def run_attribution(
             "avoided_buy_plan_runs": max(0, len(modes) * len(base_engine._trading_days) - bp_runs),
         },
         "summaries": summaries,
+        "diagnostics": diagnostics_by_mode,
         "reports": reports,
     }
 
@@ -715,6 +759,30 @@ def format_attribution_report(result: Dict[str, Any]) -> str:
             f"{row.get('avg_position_pct', 0):>7.1f}% "
             f"{row.get('orders_executed', 0):>6}"
         )
+    lines.extend([
+        "",
+        "Layer diagnostics:",
+        f"{'mode':<10} {'entry_ok':>8} {'entry_blk':>9} {'risk_ok':>8} {'risk_blk':>8} "
+        f"{'sizing_ok':>9} {'sizing_0':>9} {'avg_w':>8} {'avg_vol':>8}",
+        "-" * 92,
+    ])
+    for row in result.get("summaries", []):
+        diag = row.get("diagnostics", {}) or {}
+        lines.append(
+            f"{row.get('mode', ''):<10} "
+            f"{diag.get('entry_open_count', 0):>8} "
+            f"{diag.get('entry_block_count', 0):>9} "
+            f"{diag.get('risk_open_count', 0):>8} "
+            f"{diag.get('risk_block_count', 0):>8} "
+            f"{diag.get('sizing_positive_count', 0):>9} "
+            f"{diag.get('sizing_zero_count', 0):>9} "
+            f"{diag.get('avg_target_weight', 0):>8.2%} "
+            f"{diag.get('avg_vol_norm', 0):>8.2f}"
+        )
+        drop_reasons = diag.get("drop_reasons") or {}
+        if drop_reasons:
+            reasons = ", ".join(f"{k}:{v}" for k, v in sorted(drop_reasons.items()))
+            lines.append(f"{'':<10} drop_reasons: {reasons}")
     lines.append("=" * 92)
     return "\n".join(lines)
 

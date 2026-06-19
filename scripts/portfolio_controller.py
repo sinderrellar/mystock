@@ -550,6 +550,59 @@ def build_backtest_actions(
                              d["sizing"].get("trace", {}))
 
     # ── ⑦ 组合快照 ──
+    def _avg(values: List[float]) -> float:
+        return round(sum(values) / len(values), 4) if values else 0
+
+    non_position_decisions = [
+        d for d in decisions
+        if d["code"] not in current_positions and d["code"] not in pending_buy_codes
+    ]
+    entry_open = [
+        d for d in non_position_decisions
+        if d["entry_signal"].get("action_type") == "OPEN"
+    ]
+    risk_open = [
+        d for d in entry_open
+        if d.get("risk_gate", {}).get("OPEN", False)
+    ]
+    sizing_positive = [
+        d for d in risk_open
+        if d.get("sizing", {}).get("target_weight", 0) > 0
+    ]
+    sizing_zero = [d for d in risk_open if d not in sizing_positive]
+    drop_reasons: Dict[str, int] = {}
+    for d in risk_open:
+        reason = d.get("sizing", {}).get("drop_reason")
+        if reason:
+            drop_reasons[reason] = drop_reasons.get(reason, 0) + 1
+
+    diagnostics = {
+        "candidate_count": len(candidates),
+        "decision_count": len(decisions),
+        "new_decision_count": len(non_position_decisions),
+        "entry_open_count": len(entry_open),
+        "entry_block_count": max(0, len(non_position_decisions) - len(entry_open)),
+        "risk_open_count": len(risk_open),
+        "risk_block_count": max(0, len(entry_open) - len(risk_open)),
+        "sizing_positive_count": len(sizing_positive),
+        "sizing_zero_count": len(sizing_zero),
+        "drop_reasons": drop_reasons,
+        "avg_target_weight": _avg([
+            d.get("sizing", {}).get("target_weight", 0)
+            for d in sizing_positive
+        ]),
+        "avg_raw_weight": _avg([
+            d.get("sizing", {}).get("trace", {}).get("raw_weight", 0)
+            for d in risk_open
+        ]),
+        "avg_vol_norm": _avg([
+            d.get("sizing", {}).get("trace", {}).get("vol_norm", 0)
+            for d in risk_open
+            if d.get("sizing", {}).get("trace", {}).get("vol_norm") is not None
+        ]),
+        "action_count": len(actions),
+    }
+
     snapshot = {
         "cash": virtual_portfolio.get("cash", 0),
         "equity": virtual_portfolio.get("equity", 0),
@@ -566,6 +619,7 @@ def build_backtest_actions(
         "breadth_pct": breadth_pct,
         "regime": regime,
         "attribution_mode": attribution_mode,
+        "diagnostics": diagnostics,
     }
 
 

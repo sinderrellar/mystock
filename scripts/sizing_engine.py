@@ -13,6 +13,23 @@ Sizing Engine — 仓位分配层
 from typing import Any, Dict, Optional
 
 
+def _normalize_volatility(value: Any, default: float = 0.02) -> float:
+    """Return 20d volatility as a decimal value.
+
+    Historical trend docs store values like 2.35 for 2.35%, while sizing
+    budgets use 0.0235. Accept both forms to avoid 100x over-shrinking.
+    """
+    try:
+        vol = float(value)
+    except (TypeError, ValueError):
+        return default
+    if vol <= 0:
+        return default
+    if vol > 1:
+        return vol / 100
+    return vol
+
+
 def calculate(
     signal: Dict[str, Any],
     risk_gate: Dict[str, Any],
@@ -59,7 +76,8 @@ def calculate(
 
     # ── 波动惩罚 ──
     ss = signal.get("state_snapshot", {})
-    vol_20d = (ss.get("risk") or {}).get("volatility_20d", 0) or 0
+    raw_vol_20d = (ss.get("risk") or {}).get("volatility_20d", 0) or 0
+    vol_20d = _normalize_volatility(raw_vol_20d, default=0)
     if vol_20d > 0.25:
         scaled *= 0.8
 
@@ -76,7 +94,10 @@ def calculate(
         with open(_cfg_path) as _f: _cfg = _y.safe_load(_f)
         _cfg = _cfg.get("pyramid_middle_layer", {}).get("position_sizing", {})
     except: pass
-    baseline = portfolio.get("baseline_vol", _cfg.get("baseline_vol", 0.025))
+    baseline = _normalize_volatility(
+        portfolio.get("baseline_vol", _cfg.get("baseline_vol", 0.025)),
+        default=0.025,
+    )
     # 按 market_regime 选档（牛/震/熊不同风险预算）
     regime = portfolio.get("market_regime", "neutral")
     budget_map = _cfg.get("max_risk_budget", {"strong": 0.70, "neutral": 0.50, "weak": 0.30})
@@ -84,25 +105,29 @@ def calculate(
     used = 0.0
     for sym, pos in positions.items():
         w = abs(pos.get("weight", 0))
-        v = pos.get("volatility", 0.02)
+        v = _normalize_volatility(pos.get("volatility", 0.02))
         used += w * v / baseline
     remaining = max(0, max_budget - used)
 
     # 仓位波动估算（目标标的）
-    target_vol = (signal.get("state_snapshot", {}).get("risk") or {}).get("volatility_20d", 0.02) or 0.02
+    raw_target_vol = (signal.get("state_snapshot", {}).get("risk") or {}).get("volatility_20d", 0.02) or 0.02
+    target_vol = _normalize_volatility(raw_target_vol, default=0.02)
     vol_norm = target_vol / baseline  # 高波动股占更多预算
 
     # ── 仓位计算 + 诊断跟踪 ──
     drop_reasons = []
+    raw_weight = 0
     if action == "OPEN":
         raw = scaled * 0.20 / max(vol_norm, 0.5)  # 高波少买，低波多买
+        raw_weight = raw
         target_weight = raw
         if target_weight > 0.20: drop_reasons.append("CAP_20PCT"); target_weight = min(target_weight, 0.20)
         if remaining <= 0: drop_reasons.append("BUDGET_ZERO"); target_weight = 0
         elif target_weight > remaining: drop_reasons.append("BUDGET_LIMIT"); target_weight = remaining
     elif action == "ADD":
         add_amount = current_weight * scaled * 0.5 / max(vol_norm, 0.5)
-        target_weight = current_weight + max(0, add_amount)
+        raw_weight = current_weight + max(0, add_amount)
+        target_weight = raw_weight
         if add_amount <= 0: drop_reasons.append("ADD_ZERO")
         elif remaining <= 0: drop_reasons.append("BUDGET_ZERO"); target_weight = current_weight
         elif add_amount > remaining: drop_reasons.append("BUDGET_LIMIT")
@@ -118,7 +143,9 @@ def calculate(
         "confidence": confidence,
         "risk_scaled": round(scaled, 3),
         "drop_reason": drop_reasons[0] if drop_reasons else None,
-        "trace": {"raw_weight": round(target_weight, 4),
+        "trace": {"raw_weight": round(raw_weight, 4),
+                  "target_vol_raw": raw_target_vol,
+                  "target_vol": round(target_vol, 4),
                   "vol_norm": round(vol_norm, 2),
                   "scaled": round(scaled, 3),
                   "remaining": round(remaining, 4)},
