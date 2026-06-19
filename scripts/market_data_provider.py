@@ -742,7 +742,7 @@ class MarketDataProvider:
             return
         try:
             docs = [
-                {**bar, "code": code, "period": "daily"}
+                {**bar, "code": code, "symbol": code, "period": "daily"}
                 for bar in bars
             ]
             n = self.mongo.upsert_quotes(docs)
