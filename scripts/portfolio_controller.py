@@ -11,6 +11,8 @@ Portfolio Controller — 组合中枢 / 全局仓位管理器
 """
 
 from typing import Any, Dict, List
+import argparse
+import json
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -521,3 +523,75 @@ def _detect_drift(
         "healthy": len(issues) == 0,
         "issues": issues,
     }
+
+
+def format_report(report: Dict[str, Any]) -> str:
+    """Format the new-chain controller output for terminal/Claude consumption."""
+    if report.get("error"):
+        return f"Portfolio Controller error: {report['error']}"
+
+    state = report.get("portfolio_state", {}) or {}
+    summary = state.get("summary", {}) or {}
+    exposures = report.get("exposures", {}) or {}
+    actions = report.get("actions", []) or []
+    diagnostics = report.get("diagnostics", []) or []
+    drift = report.get("drift", {}) or {}
+
+    lines = [
+        "=" * 80,
+        "Portfolio Controller — 新架构决策链",
+        "=" * 80,
+        f"总资产: {summary.get('total_assets', 0):,.0f} | "
+        f"现金: {summary.get('cash', 0):,.0f} ({summary.get('cash_pct', 0):.1f}%) | "
+        f"浮盈亏: {summary.get('unrealized_pnl_pct', 0):+.2f}%",
+        f"组合模式: {report.get('global_mode')} | "
+        f"风险: {report.get('risk_total')} ({report.get('risk_regime')}) | "
+        f"最大行业: {exposures.get('max_sector', 0):.1%}",
+        "",
+        "── 候选诊断 ──",
+        f"{'代码':<8} {'动作':<6} {'entry':>6} {'开仓闸':>6} {'仓位系数':>8} {'目标仓位':>8} {'预算余量':>8} {'原因':<12}",
+        "-" * 80,
+    ]
+
+    for item in diagnostics[:15]:
+        lines.append(
+            f"{item.get('code',''):<8} {item.get('action',''):<6} "
+            f"{item.get('entry',0):>6.3f} {str(item.get('gate_open', False)):>6} "
+            f"{item.get('pos_mult',0):>8.2f} {item.get('target_w',0):>8.2%} "
+            f"{item.get('budget_rem',0):>8.3f} {str(item.get('drop_reason','') or ''):<12}"
+        )
+
+    lines.extend(["", "── 组合动作 ──"])
+    if actions:
+        for action in actions:
+            lines.append(json.dumps(action, ensure_ascii=False, default=str))
+    else:
+        lines.append("无组合动作")
+
+    lines.extend(["", "── 漂移检测 ──"])
+    if drift.get("issues"):
+        lines.extend(f"- {issue}" for issue in drift.get("issues", []))
+    else:
+        lines.append("未发现明显漂移")
+
+    lines.append("=" * 80)
+    return "\n".join(lines)
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Portfolio Controller — 新架构主链路 (buy_plan -> entry -> risk -> sizing -> controller)"
+    )
+    parser.add_argument("--date", "-d", default=None, help="指定日期 YYYY-MM-DD；默认使用最新缓存/实时数据")
+    parser.add_argument("--json", action="store_true", help="输出 JSON，便于 Claude/下游解析")
+    args = parser.parse_args()
+
+    result = run(date=args.date)
+    if args.json:
+        print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
+    else:
+        print(format_report(result))
+
+
+if __name__ == "__main__":
+    main()

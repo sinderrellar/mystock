@@ -77,9 +77,18 @@
 
 | 场景 | 命令 | 用途 |
 |------|------|------|
-| 组合 review | `python3 scripts/portfolio_strategy.py review` | 持仓、盈亏、观察池、告警 |
-| 行业雷达 | `python3 scripts/sector_radar.py --radar --heatmap --top 10` | 行业动量、热力、苏醒雷达 |
-| 明日候选 | `python3 scripts/buy_plan.py --top 15` | 候选池和排序 |
+| 组合决策主链路 | `python3 scripts/portfolio_controller.py --json` | 新架构完整链路：buy_plan → entry → risk → sizing → controller |
+| 行业雷达补充 | `python3 scripts/sector_radar.py --radar --heatmap --top 10` | 行业动量、热力、苏醒雷达，用于解释行业背景 |
+| 候选池单独查看 | `python3 scripts/buy_plan.py --top 15` | 只看候选池和 alpha 排序，不代表买入决策 |
+
+默认不要运行 `python3 scripts/portfolio_strategy.py review` 作为组合分析入口。它是旧 review/展示链路，仍可用于兼容查看历史格式，但不是当前工程主链路。
+
+当前主链路以 `portfolio_controller.py --json` 为准。分析组合动作时，优先读取其输出中的：
+
+- `portfolio_state.summary`：总资产、现金、浮盈亏、仓位状态。
+- `diagnostics`：每只候选的 entry、risk gate、sizing、预算余量。
+- `actions`：组合层最终动作。
+- `global_mode`、`risk_total`、`risk_regime`、`drift`：组合风险和漂移状态。
 
 如果脚本无法运行，说明失败原因和缺失信息，不要伪造结果。
 
@@ -185,7 +194,8 @@
 
 | 模块 | 回答什么 | 数据来源 |
 |------|----------|----------|
-| `portfolio_strategy` | 组合全景、持仓诊断、观察池、告警 | MongoDB + 实时行情 |
+| `portfolio_controller` | 新架构组合主链路：候选、入场、风险、仓位、组合动作 | MongoDB + `portfolio.yaml` + 实时行情 |
+| `portfolio_strategy` | 旧 review/展示链路，仅兼容查看，不作为主决策入口 | MongoDB + 实时行情 |
 | `market_data_provider` | 实时价格、RSI/KDJ/MACD/均线 | Tencent/Sina/Eastmoney/Yahoo |
 | `pyramid_multifactor` | 价值/成长/质量/动量因子 | MongoDB 财务/行情 |
 | `event_driven` | 新闻情绪、政策主题 | AKShare 新闻 + LLM |
