@@ -12,6 +12,8 @@ Sizing Engine — 仓位分配层
 
 from typing import Any, Dict, Optional
 
+from engine_config import load_middle_config
+
 
 def _normalize_volatility(value: Any, default: float = 0.02) -> float:
     """Return 20d volatility as a decimal value.
@@ -68,32 +70,43 @@ def calculate(
 
     # ── 回撤惩罚 ──
     dd_penalty = 1.0
-    if drawdown > 0.10:
-        dd_penalty = 0.7
-    if drawdown > 0.15:
-        dd_penalty = 0.5
+    _cfg = load_middle_config("position_sizing", {
+        "baseline_vol": 0.025,
+        "drawdown_penalty_1": 0.10,
+        "drawdown_penalty_2": 0.15,
+        "drawdown_multiplier_1": 0.7,
+        "drawdown_multiplier_2": 0.5,
+        "high_vol_threshold": 0.25,
+        "high_vol_multiplier": 0.8,
+        "concentration_threshold": 0.15,
+        "concentration_multiplier": 0.6,
+        "open_base_weight": 0.20,
+        "max_single_weight": 0.20,
+        "max_single_reason": "CAP_20PCT",
+        "add_multiplier": 0.5,
+        "vol_norm_floor": 0.5,
+        "max_risk_budget": {"strong": 0.70, "neutral": 0.50, "weak": 0.30},
+    })
+
+    if drawdown > _cfg.get("drawdown_penalty_1", 0.10):
+        dd_penalty = _cfg.get("drawdown_multiplier_1", 0.7)
+    if drawdown > _cfg.get("drawdown_penalty_2", 0.15):
+        dd_penalty = _cfg.get("drawdown_multiplier_2", 0.5)
     scaled *= dd_penalty
 
     # ── 波动惩罚 ──
     ss = signal.get("state_snapshot", {})
     raw_vol_20d = (ss.get("risk") or {}).get("volatility_20d", 0) or 0
     vol_20d = _normalize_volatility(raw_vol_20d, default=0)
-    if vol_20d > 0.25:
-        scaled *= 0.8
+    if vol_20d > _cfg.get("high_vol_threshold", 0.25):
+        scaled *= _cfg.get("high_vol_multiplier", 0.8)
 
     # ── 集中度惩罚 ──
     max_weight = max((p.get("weight", 0) for p in positions.values()), default=0)
-    if max_weight > 0.15:
-        scaled *= 0.6
+    if max_weight > _cfg.get("concentration_threshold", 0.15):
+        scaled *= _cfg.get("concentration_multiplier", 0.6)
 
     # ── 动态风险预算（参数从 config 读取）──
-    import os, yaml as _y
-    _cfg = {}
-    try:
-        _cfg_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "config", "config_complete.yaml")
-        with open(_cfg_path) as _f: _cfg = _y.safe_load(_f)
-        _cfg = _cfg.get("pyramid_middle_layer", {}).get("position_sizing", {})
-    except: pass
     baseline = _normalize_volatility(
         portfolio.get("baseline_vol", _cfg.get("baseline_vol", 0.025)),
         default=0.025,
@@ -117,21 +130,24 @@ def calculate(
     # ── 仓位计算 + 诊断跟踪 ──
     drop_reasons = []
     raw_weight = 0
+    vol_norm_floor = _cfg.get("vol_norm_floor", 0.5)
+    max_single_weight = _cfg.get("max_single_weight", 0.20)
+    max_single_reason = _cfg.get("max_single_reason", "CAP_20PCT")
     if action == "OPEN":
-        raw = scaled * 0.20 / max(vol_norm, 0.5)  # 高波少买，低波多买
+        raw = scaled * _cfg.get("open_base_weight", 0.20) / max(vol_norm, vol_norm_floor)
         raw_weight = raw
         target_weight = raw
-        if target_weight > 0.20: drop_reasons.append("CAP_20PCT"); target_weight = min(target_weight, 0.20)
+        if target_weight > max_single_weight: drop_reasons.append(max_single_reason); target_weight = min(target_weight, max_single_weight)
         if remaining <= 0: drop_reasons.append("BUDGET_ZERO"); target_weight = 0
         elif target_weight > remaining: drop_reasons.append("BUDGET_LIMIT"); target_weight = remaining
     elif action == "ADD":
-        add_amount = current_weight * scaled * 0.5 / max(vol_norm, 0.5)
+        add_amount = current_weight * scaled * _cfg.get("add_multiplier", 0.5) / max(vol_norm, vol_norm_floor)
         raw_weight = current_weight + max(0, add_amount)
         target_weight = raw_weight
         if add_amount <= 0: drop_reasons.append("ADD_ZERO")
         elif remaining <= 0: drop_reasons.append("BUDGET_ZERO"); target_weight = current_weight
         elif add_amount > remaining: drop_reasons.append("BUDGET_LIMIT")
-        if target_weight > 0.20: drop_reasons.append("CAP_20PCT"); target_weight = min(target_weight, 0.20)
+        if target_weight > max_single_weight: drop_reasons.append(max_single_reason); target_weight = min(target_weight, max_single_weight)
     else:
         target_weight = 0
 
@@ -157,8 +173,8 @@ def calculate(
         },
         "constraints": {
             "drawdown_adjusted": dd_penalty < 1.0,
-            "vol_adjusted": vol_20d > 0.25,
-            "cap_hit": target_weight >= 0.20,
+            "vol_adjusted": vol_20d > _cfg.get("high_vol_threshold", 0.25),
+            "cap_hit": target_weight >= max_single_weight,
             "budget_hit": remaining <= 0,
         },
     }

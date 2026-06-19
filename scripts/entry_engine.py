@@ -11,6 +11,8 @@ Entry Engine — 交易时机层 (Time-Series Entry Timing)
 
 from typing import Any, Dict, Optional
 
+from engine_config import load_middle_config
+
 
 def evaluate(stock: Dict[str, Any]) -> Dict[str, Any]:
     """评估单只股票的买入时机。
@@ -31,6 +33,28 @@ def evaluate(stock: Dict[str, Any]) -> Dict[str, Any]:
     target_zone = stock.get("target_buy_zone", "")
     pe_pct = stock.get("pe_percentile_self")
     alpha_ctx = stock.get("alpha_context", {})
+    cfg = load_middle_config("entry_engine", {
+        "ret20_up": 0,
+        "ret20_controlled_down": -5,
+        "ma20_near_pct": -3,
+        "ret5_up": 0,
+        "ret5_stable_down": -3,
+        "rsi_neutral_min": 40,
+        "rsi_neutral_max": 60,
+        "rsi_oversold": 30,
+        "rsi_overheated": 75,
+        "kdj_turn_min": 0,
+        "kdj_turn_max": 10,
+        "technical_weights": {"trend": 0.30, "position": 0.20, "momentum": 0.20, "reversal": 0.20, "volume": 0.10},
+        "alpha_weights": {"momentum": 0.40, "cycle": 0.35, "turnaround": 0.25},
+        "alpha_bonus_scale": 0.6,
+        "alpha_min_technical": 0.55,
+        "open_threshold": 0.65,
+        "add_threshold": 0.45,
+        "improving_cycle": 0.6,
+        "neutral_cycle": 0.4,
+        "high_volatility": 3.0,
+    })
 
     if not trend.get("available"):
         return {"entry_score": 0, "technical_score": 0, "alpha_bonus": 0,
@@ -60,10 +84,10 @@ def evaluate(stock: Dict[str, Any]) -> Dict[str, Any]:
     # ① 趋势方向（30%）
     trend_score = 0.5
     if ret_20d is not None:
-        if ret_20d > 0:
+        if ret_20d > cfg.get("ret20_up", 0):
             trend_score = 0.9
             details.append(f"20日 {ret_20d:+.1f}% 趋势向上")
-        elif ret_20d > -5:
+        elif ret_20d > cfg.get("ret20_controlled_down", -5):
             trend_score = 0.6
             details.append(f"20日 {ret_20d:+.1f}% 跌幅可控")
         else:
@@ -79,7 +103,7 @@ def evaluate(stock: Dict[str, Any]) -> Dict[str, Any]:
             pos_score = 0.9
             details.append(f"站上MA60({ma60:.1f})")
     elif ma20_dist is not None:
-        if ma20_dist > -3:
+        if ma20_dist > cfg.get("ma20_near_pct", -3):
             pos_score = 0.5
             details.append(f"距MA20 {ma20_dist:.1f}%，接近中")
         else:
@@ -89,13 +113,13 @@ def evaluate(stock: Dict[str, Any]) -> Dict[str, Any]:
     # ③ 短期动量（20%）
     mom_score = 0.5
     if ret_5d is not None:
-        if ret_5d > 0:
+        if ret_5d > cfg.get("ret5_up", 0):
             mom_score = 0.7
             details.append(f"5日 {ret_5d:+.1f}%")
             if ret_20d is not None and ret_5d > ret_20d:
                 mom_score = 0.85
                 details.append("5日>20日，加速中")
-        elif ret_5d > -3:
+        elif ret_5d > cfg.get("ret5_stable_down", -3):
             mom_score = 0.5
             details.append(f"5日 {ret_5d:+.1f}% 企稳")
         else:
@@ -105,17 +129,17 @@ def evaluate(stock: Dict[str, Any]) -> Dict[str, Any]:
     # ④ 反转信号（20%）
     rev_score = 0.5
     if rsi is not None:
-        if 40 <= rsi <= 60:
+        if cfg.get("rsi_neutral_min", 40) <= rsi <= cfg.get("rsi_neutral_max", 60):
             rev_score = 0.8
             details.append(f"RSI {rsi:.0f} 温和")
-        elif rsi < 30:
+        elif rsi < cfg.get("rsi_oversold", 30):
             rev_score = 0.3
             details.append(f"RSI {rsi:.0f} 超卖")
-        elif rsi > 75:
+        elif rsi > cfg.get("rsi_overheated", 75):
             rev_score = 0.2
             details.append(f"RSI {rsi:.0f} 过热")
 
-    if kdj_j is not None and kdj_j > 0 and kdj_j < 10:
+    if kdj_j is not None and kdj_j > cfg.get("kdj_turn_min", 0) and kdj_j < cfg.get("kdj_turn_max", 10):
         rev_score = min(1.0, rev_score + 0.1)
         details.append(f"KDJ J={kdj_j:.1f} 刚翻正")
     elif kdj_j is not None and kdj_j < 0 and ret_5d is not None and ret_20d is not None and ret_5d > ret_20d:
@@ -131,8 +155,10 @@ def evaluate(stock: Dict[str, Any]) -> Dict[str, Any]:
         vol_score = 0.3
         details.append("缩量信号")
 
-    technical_score = 0.30 * trend_score + 0.20 * pos_score \
-                    + 0.20 * mom_score + 0.20 * rev_score + 0.10 * vol_score
+    tech_w = cfg.get("technical_weights", {})
+    technical_score = tech_w.get("trend", 0.30) * trend_score + tech_w.get("position", 0.20) * pos_score \
+                    + tech_w.get("momentum", 0.20) * mom_score + tech_w.get("reversal", 0.20) * rev_score \
+                    + tech_w.get("volume", 0.10) * vol_score
 
     # ═══════════════════════════════════════════
     # Alpha 加成层（40%）：buy_plan 因子分
@@ -141,11 +167,12 @@ def evaluate(stock: Dict[str, Any]) -> Dict[str, Any]:
     m = alpha_ctx.get("momentum", 0.5)
     c = alpha_ctx.get("cycle", 0.5)
     t = alpha_ctx.get("turnaround", 0.5)
-    alpha_bonus_raw = 0.40 * m + 0.35 * c + 0.25 * t
-    alpha_bonus = round((alpha_bonus_raw - 0.5) * 0.6, 2)
+    alpha_w = cfg.get("alpha_weights", {})
+    alpha_bonus_raw = alpha_w.get("momentum", 0.40) * m + alpha_w.get("cycle", 0.35) * c + alpha_w.get("turnaround", 0.25) * t
+    alpha_bonus = round((alpha_bonus_raw - 0.5) * cfg.get("alpha_bonus_scale", 0.6), 2)
 
     entry_score = technical_score
-    if technical_score >= 0.55:
+    if technical_score >= cfg.get("alpha_min_technical", 0.55):
         entry_score = min(1.0, technical_score + alpha_bonus)
 
     # ═══════════════════════════════════════════
@@ -155,8 +182,8 @@ def evaluate(stock: Dict[str, Any]) -> Dict[str, Any]:
     atr_pct = round(vol_20d / price * 100, 2) if vol_20d and price else None
 
     cycle = alpha_ctx.get("cycle", 0.5)
-    if cycle >= 0.6:   market_regime = "improving"
-    elif cycle >= 0.4: market_regime = "neutral"
+    if cycle >= cfg.get("improving_cycle", 0.6):   market_regime = "improving"
+    elif cycle >= cfg.get("neutral_cycle", 0.4): market_regime = "neutral"
     else:              market_regime = "cooling"
 
     state_snapshot = {
@@ -182,7 +209,7 @@ def evaluate(stock: Dict[str, Any]) -> Dict[str, Any]:
         "risk": {
             "volatility_20d": vol_20d,
             "atr_pct": atr_pct,
-            "vol_regime": "high" if (vol_20d and vol_20d > 3.0) else "normal",
+            "vol_regime": "high" if (vol_20d and vol_20d > cfg.get("high_volatility", 3.0)) else "normal",
         },
         "market": {
             "regime": market_regime,
@@ -193,9 +220,9 @@ def evaluate(stock: Dict[str, Any]) -> Dict[str, Any]:
     # 纯状态机输出：不做 UI 解释，portfolio 负责
     star_score = min(5, max(0, round(entry_score * 5)))
     # entry 只出信号类型，portfolio 结合仓位做唯一决策
-    if entry_score >= 0.65:
+    if entry_score >= cfg.get("open_threshold", 0.65):
         action_type = "OPEN"
-    elif entry_score >= 0.45:
+    elif entry_score >= cfg.get("add_threshold", 0.45):
         action_type = "ADD"
     else:
         action_type = "NONE"

@@ -108,6 +108,9 @@ def validate_system_config(config: Dict[str, Any], config_path: str = DEFAULT_CO
     _require_mapping(config, "pyramid_middle_layer.turnaround.weights")
     _require_mapping(config, "pyramid_middle_layer.turnaround.forecast_weight")
     _require_mapping(config, "pyramid_middle_layer.sector_radar")
+    _require_mapping(config, "pyramid_middle_layer.entry_engine")
+    _require_mapping(config, "pyramid_middle_layer.risk_engine")
+    _require_mapping(config, "pyramid_middle_layer.portfolio_controller")
     _require_mapping(config, "pyramid_bottom_layer.position_sizing")
 
 

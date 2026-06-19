@@ -14,6 +14,8 @@ from typing import Any, Dict, List
 import argparse
 import json
 
+from engine_config import load_middle_config
+
 
 # ═══════════════════════════════════════════════════════════════
 # 共享基础设施：run() 和 run_backtest() 共用
@@ -126,7 +128,28 @@ def evaluate(
     equity = portfolio.get("equity", 1_000_000)
     cash_ratio = portfolio.get("cash_ratio", 0.30)
     drawdown = abs(portfolio.get("drawdown", 0))
-    max_dd = portfolio.get("max_drawdown", 0.20)
+    cfg = load_middle_config("portfolio_controller", {
+        "max_drawdown": 0.20,
+        "risk_off_dd_pressure": 0.8,
+        "risk_off_total_risk": 0.80,
+        "defensive_dd_pressure": 0.6,
+        "defensive_total_risk": 0.65,
+        "risk_off_recovery_dd": 0.4,
+        "risk_off_recovery_risk": 0.5,
+        "defensive_recovery_dd": 0.3,
+        "defensive_recovery_risk": 0.4,
+        "aggressive_dd_pressure": 0.25,
+        "aggressive_total_risk": 0.35,
+        "aggressive_cash_ratio": 0.25,
+        "max_single_weight": 0.20,
+        "max_sector_weight": 0.30,
+        "min_cash_ratio": 0.10,
+        "defensive_min_cash_ratio": 0.25,
+        "max_position_count": 12,
+        "defensive_max_position_count": 8,
+        "defensive_trim_weight": 0.15,
+    })
+    max_dd = portfolio.get("max_drawdown", cfg.get("max_drawdown", 0.20))
     total_risk = risk.get("total_risk", 0.5)
 
     # ── ① 组合级暴露计算 ──
@@ -145,15 +168,15 @@ def evaluate(
     dd_pressure = drawdown / max_dd if max_dd > 0 else 0
     prev_mode = portfolio.get("prev_mode", "NORMAL")
 
-    if dd_pressure > 0.8 or total_risk > 0.80:
+    if dd_pressure > cfg.get("risk_off_dd_pressure", 0.8) or total_risk > cfg.get("risk_off_total_risk", 0.80):
         global_mode = "RISK_OFF"
-    elif dd_pressure > 0.6 or total_risk > 0.65:
+    elif dd_pressure > cfg.get("defensive_dd_pressure", 0.6) or total_risk > cfg.get("defensive_total_risk", 0.65):
         global_mode = "DEFENSIVE"
-    elif prev_mode == "RISK_OFF" and dd_pressure < 0.4 and total_risk < 0.5:
+    elif prev_mode == "RISK_OFF" and dd_pressure < cfg.get("risk_off_recovery_dd", 0.4) and total_risk < cfg.get("risk_off_recovery_risk", 0.5):
         global_mode = "RECOVERY"          # 从熔断中恢复
-    elif prev_mode == "DEFENSIVE" and dd_pressure < 0.3 and total_risk < 0.4:
+    elif prev_mode == "DEFENSIVE" and dd_pressure < cfg.get("defensive_recovery_dd", 0.3) and total_risk < cfg.get("defensive_recovery_risk", 0.4):
         global_mode = "RECOVERY"
-    elif dd_pressure < 0.25 and total_risk < 0.35 and cash_ratio > 0.25:
+    elif dd_pressure < cfg.get("aggressive_dd_pressure", 0.25) and total_risk < cfg.get("aggressive_total_risk", 0.35) and cash_ratio > cfg.get("aggressive_cash_ratio", 0.25):
         global_mode = "AGGRESSIVE"
     elif prev_mode == "RECOVERY":
         global_mode = "NORMAL"            # 恢复完成
@@ -162,10 +185,10 @@ def evaluate(
 
     # ── ③ 约束 ──
     constraints = {
-        "max_single_weight": 0.20,
-        "max_sector_weight": 0.30,
-        "min_cash_ratio": 0.10 if global_mode != "DEFENSIVE" else 0.25,
-        "max_position_count": 12 if global_mode != "DEFENSIVE" else 8,
+        "max_single_weight": cfg.get("max_single_weight", 0.20),
+        "max_sector_weight": cfg.get("max_sector_weight", 0.30),
+        "min_cash_ratio": cfg.get("min_cash_ratio", 0.10) if global_mode != "DEFENSIVE" else cfg.get("defensive_min_cash_ratio", 0.25),
+        "max_position_count": cfg.get("max_position_count", 12) if global_mode != "DEFENSIVE" else cfg.get("defensive_max_position_count", 8),
     }
 
     # ── ④ 个股动作建议 ──
@@ -185,9 +208,9 @@ def evaluate(
                            "from": round(current_w, 3),
                            "to": constraints["max_single_weight"],
                            "reason": "超过单票上限"})
-        elif global_mode == "DEFENSIVE" and current_w > 0.15:
+        elif global_mode == "DEFENSIVE" and current_w > cfg.get("defensive_trim_weight", 0.15):
             actions.append({"symbol": sym, "action": "TRIM",
-                           "from": round(current_w, 3), "to": 0.15,
+                           "from": round(current_w, 3), "to": cfg.get("defensive_trim_weight", 0.15),
                            "reason": "防守模式降仓"})
         elif action_type in ("OPEN", "ADD"):
             actions.append({"symbol": sym, "action": action_type,
@@ -322,6 +345,7 @@ def _build_virtual_pf_meta(
     调用前 virtual_portfolio 必须已完成 mark-to-market（weight/unrealized_pnl 已更新）。
     """
     config = config_override or {}
+    ctrl_cfg = load_middle_config("portfolio_controller", {"max_drawdown": 0.20})
     positions = vp.get("positions", {})
     equity = vp.get("equity", 1_000_000)
     cash = vp.get("cash", 1_000_000)
@@ -344,7 +368,7 @@ def _build_virtual_pf_meta(
         "equity": equity,
         "cash_ratio": cash / equity if equity > 0 else 1.0,
         "drawdown": drawdown,
-        "max_drawdown": 0.20,
+        "max_drawdown": config.get("max_drawdown", ctrl_cfg.get("max_drawdown", 0.20)),
         "prev_mode": "NORMAL",
         "max_risk_budget": config.get("max_risk_budget", 0.60),
         "baseline_vol": config.get("baseline_vol", 0.025),
@@ -483,9 +507,16 @@ def build_backtest_actions(
 
     actions = []
     sum_target_weight = 0.0
+    ctrl_cfg = load_middle_config("portfolio_controller", {
+        "baseline_weight_cap": 0.10,
+        "close_entry_score": 0.35,
+    })
     baseline_weight = config.get("baseline_weight")
     if baseline_weight is None:
-        baseline_weight = min(0.10, config.get("max_risk_budget", 0.60) / max(top_n, 1))
+        baseline_weight = min(
+            ctrl_cfg.get("baseline_weight_cap", 0.10),
+            config.get("max_risk_budget", 0.60) / max(top_n, 1),
+        )
 
     def _append_open(code: str, target_weight: float, entry_score: float,
                      industry: str = "", reason: Any = None) -> None:
@@ -521,7 +552,7 @@ def build_backtest_actions(
 
         if in_position:
             # 持仓股 CLOSE：entry 恶化到 NONE 且 entry_score < 0.35
-            if action_type == "NONE" and entry_score < 0.35:
+            if action_type == "NONE" and entry_score < ctrl_cfg.get("close_entry_score", 0.35):
                 actions.append({
                     "code": code, "action": "CLOSE",
                     "entry_score": entry_score,
@@ -629,22 +660,29 @@ def _detect_drift(
     market: Dict[str, Any],
 ) -> Dict[str, Any]:
     """检测组合风格/行业漂移。"""
+    cfg = load_middle_config("portfolio_controller", {
+        "drift_sector_weight": 0.25,
+        "drift_single_weight": 0.18,
+        "drift_loser_count": 3,
+        "drift_loser_pnl": -0.10,
+    })
     issues = []
 
     # 行业过度集中
     for ind, w in sectors.items():
-        if w > 0.25:
+        if w > cfg.get("drift_sector_weight", 0.25):
             issues.append(f"行业'{ind}'过度集中({w:.0%})")
 
     # 单票过大
     for sym, pos in positions.items():
-        if pos.get("weight", 0) > 0.18:
+        if pos.get("weight", 0) > cfg.get("drift_single_weight", 0.18):
             issues.append(f"{sym} 仓位接近上限({pos['weight']:.0%})")
 
     # 亏损集中
-    losers = sum(1 for p in positions.values() if p.get("pnl", 0) < -0.10)
-    if losers >= 3:
-        issues.append(f"{losers}只浮亏>10%，需排查")
+    loser_pnl = cfg.get("drift_loser_pnl", -0.10)
+    losers = sum(1 for p in positions.values() if p.get("pnl", 0) < loser_pnl)
+    if losers >= cfg.get("drift_loser_count", 3):
+        issues.append(f"{losers}只浮亏>{abs(loser_pnl):.0%}，需排查")
 
     return {
         "healthy": len(issues) == 0,

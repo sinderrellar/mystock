@@ -113,10 +113,108 @@ pyramid_middle_layer:
     baseline_vol: 0.025       # 波动率归一基准（A股中位日波动约2.5%）
     drawdown_penalty_1: 0.10  # 回撤>10% → 仓位×0.7
     drawdown_penalty_2: 0.15  # 回撤>15% → 仓位×0.5
+    drawdown_multiplier_1: 0.7
+    drawdown_multiplier_2: 0.5
+    high_vol_threshold: 0.25
+    high_vol_multiplier: 0.8
+    concentration_threshold: 0.15
+    concentration_multiplier: 0.6
+    open_base_weight: 0.20
+    max_single_weight: 0.20
+    max_single_reason: "CAP_20PCT"
+    add_multiplier: 0.5
+    vol_norm_floor: 0.5
     max_risk_budget:           # 风险预算上限（按市场宽度动态选档）
       strong: 0.70             # 牛市：满仓运行
       neutral: 0.50            # 震荡：标准
       weak: 0.30               # 熊市：降风险
+
+  entry_engine:
+    ret20_up: 0
+    ret20_controlled_down: -5
+    ma20_near_pct: -3
+    ret5_up: 0
+    ret5_stable_down: -3
+    rsi_neutral_min: 40
+    rsi_neutral_max: 60
+    rsi_oversold: 30
+    rsi_overheated: 75
+    kdj_turn_min: 0
+    kdj_turn_max: 10
+    technical_weights:
+      trend: 0.30
+      position: 0.20
+      momentum: 0.20
+      reversal: 0.20
+      volume: 0.10
+    alpha_weights:
+      momentum: 0.40
+      cycle: 0.35
+      turnaround: 0.25
+    alpha_bonus_scale: 0.6
+    alpha_min_technical: 0.55
+    open_threshold: 0.65
+    add_threshold: 0.45
+    improving_cycle: 0.6
+    neutral_cycle: 0.4
+    high_volatility: 3.0
+
+  risk_engine:
+    target_drawdown: 0.20
+    default_volatility_index: 0.5
+    drawdown_vol_penalty_weight: 0.5
+    concentration_stock_weight: 0.5
+    concentration_sector_weight: 0.5
+    vol_high: 0.7
+    vol_mid: 0.4
+    vol_high_score: 1.0
+    vol_mid_score: 0.6
+    vol_low_score: 0.3
+    add_signal_multiplier: 0.6
+    market_cooling_risk: 0.2
+    market_improving_risk: -0.1
+    component_weights:
+      drawdown: 0.40
+      volatility: 0.25
+      concentration: 0.15
+      signal: 0.10
+      market: 0.10
+    low_risk_cutoff: 0.45
+    high_risk_cutoff: 0.65
+    open_gate: 0.60
+    add_gate: 0.55
+    position_multiplier_floor: 0.25
+    reason_drawdown: 0.5
+    reason_volatility: 0.7
+    reason_concentration: 0.5
+    reason_signal: 0.5
+
+  portfolio_controller:
+    max_drawdown: 0.20
+    risk_off_dd_pressure: 0.8
+    risk_off_total_risk: 0.80
+    defensive_dd_pressure: 0.6
+    defensive_total_risk: 0.65
+    risk_off_recovery_dd: 0.4
+    risk_off_recovery_risk: 0.5
+    defensive_recovery_dd: 0.3
+    defensive_recovery_risk: 0.4
+    aggressive_dd_pressure: 0.25
+    aggressive_total_risk: 0.35
+    aggressive_cash_ratio: 0.25
+    max_single_weight: 0.20
+    max_sector_weight: 0.30
+    min_cash_ratio: 0.10
+    defensive_min_cash_ratio: 0.25
+    max_position_count: 12
+    defensive_max_position_count: 8
+    defensive_trim_weight: 0.15
+    baseline_weight_cap: 0.10
+    close_entry_score: 0.35
+    drift_sector_weight: 0.25
+    drift_single_weight: 0.18
+    drift_loser_count: 3
+    drift_loser_pnl: -0.10
 
   # turnaround_score 因子权重 + 标签阈值
   turnaround:
