@@ -187,7 +187,7 @@ def import_stocks(codes: List[str], store: MongoFactorDataStore,
 # 全市场日线预导入 — 供 buy_plan 等策略直接查询
 # ============================================================
 
-def import_universe_quotes(store: MongoFactorDataStore, limit: int = 800) -> Dict[str, Any]:
+def import_universe_quotes(store: MongoFactorDataStore, limit: int = 5000) -> Dict[str, Any]:
     """预导入大盘股的日线数据（市值排序前 N 只），供 buy_plan 直接查询。
 
     从 MongoDB basic_info 取已有股票的代码列表，按成交额排序取前 N 只，
@@ -207,14 +207,18 @@ def import_universe_quotes(store: MongoFactorDataStore, limit: int = 800) -> Dic
     )
     print(f"  已有近期日线: {len(recent_codes)} 只")
 
-    # 从基础信息中取大盘股（成交额排序），排除已有近期数据的
-    # Layer 0 生存过滤：成交额≥5000万 + 市值>50亿 + PE>0且<200
-    query = {
+    pool = _get_pool_filters()
+    base_query = {
         "display_market": "A股",
-        "market": {"$in": ["主板", "创业板", "科创板"]},
-        "latest_amount": {"$gte": 5_000},  # 万元单位，5000万
-        "total_mv": {"$gte": 5_000_000_000},
-        "pe": {"$gt": 0, "$lt": 50},  # 对齐价值因子 high 阈值(25)，留余量,
+        "market": {"$in": pool.get("markets", ["主板", "创业板", "科创板"])},
+        "latest_amount": {"$gte": pool.get("min_amount", 50000000) / 10000},
+        "total_mv": {"$gte": pool.get("min_market_cap", 5000000000)},
+    }
+    coverage_pool_count = store.db[store.collections["basic_info"]].count_documents(base_query)
+
+    # 行情覆盖层只按交易活跃度/市值过滤，不用 PE；PE 是下游因子和策略层的筛选条件。
+    query = {
+        **base_query,
         "code": {"$nin": list(recent_codes)},
     }
     all_stocks = list(store.db[store.collections["basic_info"]].find(
@@ -229,7 +233,7 @@ def import_universe_quotes(store: MongoFactorDataStore, limit: int = 800) -> Dic
              "market": "A股", "asset_type": "stock"} for s in all_stocks]
     skipped = len(recent_codes)
 
-    print(f"  可投池(需导入): {len(all_stocks)} 只（已有 {skipped} 只跳过）")
+    print(f"  行情覆盖池: {coverage_pool_count} 只；需导入: {len(all_stocks)} 只（已有 {skipped} 只跳过）")
 
     importer = FactorDataImporter(store, quote_limit=180)
     stats = importer.sync_positions(todo, sleep_seconds=0.25)
@@ -274,7 +278,8 @@ def import_universe_quotes(store: MongoFactorDataStore, limit: int = 800) -> Dic
         if hk_imported > 0:
             ok += hk_imported
 
-    return {"ok": True, "imported": ok, "skipped": skipped}
+    return {"ok": True, "imported": ok, "skipped": skipped,
+            "coverage_pool_count": coverage_pool_count}
 
 
 def _load_portfolio_hk_stocks() -> List[Dict[str, Any]]:
@@ -1452,7 +1457,7 @@ def main() -> None:
     parser.add_argument("--config", default=os.path.join(PROJECT_ROOT, "config", "config_complete.yaml"))
     parser.add_argument("--portfolio", default=os.path.join(PROJECT_ROOT, "data", "portfolio.yaml"))
     parser.add_argument("--market", default="A股")
-    parser.add_argument("--quote-limit", type=int, default=180)
+    parser.add_argument("--quote-limit", type=int, default=None)
     parser.add_argument("--sleep", type=float, default=0.6)
     args = parser.parse_args()
 
@@ -1469,20 +1474,20 @@ def main() -> None:
     store = MongoFactorDataStore(mongodb_config)
 
     if args.command == "import-portfolio":
-        import_portfolio(args.portfolio, store, quote_limit=args.quote_limit, sleep_seconds=args.sleep)
+        import_portfolio(args.portfolio, store, quote_limit=args.quote_limit or 180, sleep_seconds=args.sleep)
 
     elif args.command == "import-stocks":
         if not args.codes:
             print("错误: import-stocks 需要 --codes 参数 (逗号分隔，如 600941,000001)")
             return
         codes = [c.strip() for c in args.codes.split(",") if c.strip()]
-        import_stocks(codes, store, quote_limit=args.quote_limit, sleep_seconds=args.sleep)
+        import_stocks(codes, store, quote_limit=args.quote_limit or 180, sleep_seconds=args.sleep)
 
     elif args.command == "import-universe-light":
         import_universe_light(store)
 
     elif args.command == "import-universe-quotes":
-        import_universe_quotes(store, limit=args.quote_limit or 800)
+        import_universe_quotes(store, limit=args.quote_limit or 5000)
 
 
     elif args.command == "import-hk-shortsell":
@@ -1520,12 +1525,12 @@ def main() -> None:
         import_all(args.config, args.portfolio)
 
     elif args.command == "import-stock-moneyflow":
-        limit = args.quote_limit if args.quote_limit != 180 else 3000
+        limit = args.quote_limit or 3000
         result = import_stock_moneyflow(store, limit=limit)
         print(result)
 
     elif args.command == "import-stock-forecast":
-        limit = args.quote_limit if args.quote_limit != 180 else 3000
+        limit = args.quote_limit or 3000
         result = import_stock_forecast(store, limit=limit)
         print(result)
 
