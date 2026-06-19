@@ -187,7 +187,12 @@ def import_stocks(codes: List[str], store: MongoFactorDataStore,
 # 全市场日线预导入 — 供 buy_plan 等策略直接查询
 # ============================================================
 
-def import_universe_quotes(store: MongoFactorDataStore, limit: int = 5000) -> Dict[str, Any]:
+def import_universe_quotes(
+    store: MongoFactorDataStore,
+    limit: int = 5000,
+    workers: int = 8,
+    quote_sleep: float = 0.0,
+) -> Dict[str, Any]:
     """预导入大盘股的日线数据（市值排序前 N 只），供 buy_plan 直接查询。
 
     从 MongoDB basic_info 取已有股票的代码列表，按成交额排序取前 N 只，
@@ -235,9 +240,16 @@ def import_universe_quotes(store: MongoFactorDataStore, limit: int = 5000) -> Di
 
     print(f"  行情覆盖池: {coverage_pool_count} 只；需导入: {len(all_stocks)} 只（已有 {skipped} 只跳过）")
 
+    worker_count = min(max(1, workers), 32)
+    sleep_seconds = max(0.0, quote_sleep)
     importer = FactorDataImporter(store, quote_limit=180)
-    stats = importer.sync_positions(todo, sleep_seconds=0.25)
-    ok = sum(1 for item in stats.get("items", []) if item.get("ok"))
+    print(f"  quote-only 快速导入: workers={worker_count}, quote_sleep={sleep_seconds}s")
+    stats = importer.sync_quotes_only(
+        todo,
+        sleep_seconds=sleep_seconds,
+        workers=worker_count,
+    )
+    ok = stats.get("success", 0)
     print(f"  完成: {ok}/{len(todo)}")
 
     # 港股持仓日线（AKShare stock_hk_daily，免费不限频）
@@ -279,7 +291,11 @@ def import_universe_quotes(store: MongoFactorDataStore, limit: int = 5000) -> Di
             ok += hk_imported
 
     return {"ok": True, "imported": ok, "skipped": skipped,
-            "coverage_pool_count": coverage_pool_count}
+            "failed": stats.get("failed", 0),
+            "coverage_pool_count": coverage_pool_count,
+            "quote_only": True,
+            "workers": worker_count,
+            "quote_sleep": sleep_seconds}
 
 
 def _load_portfolio_hk_stocks() -> List[Dict[str, Any]]:
@@ -1459,6 +1475,10 @@ def main() -> None:
     parser.add_argument("--market", default="A股")
     parser.add_argument("--quote-limit", type=int, default=None)
     parser.add_argument("--sleep", type=float, default=0.6)
+    parser.add_argument("--workers", type=int, default=8,
+                        help="import-universe-quotes quote fetch concurrency")
+    parser.add_argument("--quote-sleep", type=float, default=0.0,
+                        help="import-universe-quotes sleep seconds after each quote fetch")
     args = parser.parse_args()
 
     if args.command == "config-check":
@@ -1487,7 +1507,12 @@ def main() -> None:
         import_universe_light(store)
 
     elif args.command == "import-universe-quotes":
-        import_universe_quotes(store, limit=args.quote_limit or 5000)
+        import_universe_quotes(
+            store,
+            limit=args.quote_limit or 5000,
+            workers=args.workers,
+            quote_sleep=args.quote_sleep,
+        )
 
 
     elif args.command == "import-hk-shortsell":

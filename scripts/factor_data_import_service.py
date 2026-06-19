@@ -11,6 +11,7 @@ runtime surface.
 import argparse
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import UTC, datetime
 from functools import partial
 from typing import Any, Dict, Iterable, List, Optional
@@ -416,6 +417,66 @@ class FactorDataImporter:
                 time.sleep(sleep_seconds)
             if total >= 50 and (i + 1) % 100 == 0:
                 print(f"  进度: {i+1}/{total} (成功 {stats['success']}, 失败 {stats['failed']})")
+        return stats
+
+    def sync_quotes_only(
+        self,
+        positions: List[Dict[str, Any]],
+        sleep_seconds: float = 0.0,
+        workers: int = 1,
+    ) -> Dict[str, Any]:
+        """Fetch and upsert daily quotes only.
+
+        Universe quote coverage should not pay for per-stock basic/financial
+        refreshes. This keeps full `sync_positions()` for portfolio/deep imports
+        and gives `import-universe-quotes` a fast path.
+        """
+        stats = {"success": 0, "failed": 0, "items": []}
+        total = len(positions)
+
+        def _one(position: Dict[str, Any]) -> Dict[str, Any]:
+            code = _clean_code(position.get("code"), position.get("market", "A股"))
+            if not code:
+                return {"code": "", "ok": False, "error": "empty code"}
+            pos = {**position, "code": code, "market": position.get("market", "A股")}
+            quotes = self._safe_fetch("A股行情", self._fetch_a_quotes, pos, [], [])
+            quote_count = self.store.upsert_quotes(quotes)
+            if sleep_seconds > 0:
+                time.sleep(sleep_seconds)
+            return {"code": code, "ok": bool(quotes), "quotes": quote_count}
+
+        if workers <= 1:
+            for i, position in enumerate(positions):
+                try:
+                    item = _one(position)
+                except Exception as exc:
+                    code = _clean_code(position.get("code"), position.get("market", "A股"))
+                    item = {"code": code, "ok": False, "error": str(exc)}
+                stats["items"].append(item)
+                if item.get("ok"):
+                    stats["success"] += 1
+                else:
+                    stats["failed"] += 1
+                if total >= 50 and (i + 1) % 100 == 0:
+                    print(f"  进度: {i+1}/{total} (成功 {stats['success']}, 失败 {stats['failed']})")
+            return stats
+
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            future_map = {executor.submit(_one, position): position for position in positions}
+            for i, future in enumerate(as_completed(future_map), start=1):
+                position = future_map[future]
+                try:
+                    item = future.result()
+                except Exception as exc:
+                    code = _clean_code(position.get("code"), position.get("market", "A股"))
+                    item = {"code": code, "ok": False, "error": str(exc)}
+                stats["items"].append(item)
+                if item.get("ok"):
+                    stats["success"] += 1
+                else:
+                    stats["failed"] += 1
+                if total >= 50 and i % 100 == 0:
+                    print(f"  进度: {i}/{total} (成功 {stats['success']}, 失败 {stats['failed']})")
         return stats
 
     def sync_universe_basic(self, market: str = "A股") -> Dict[str, Any]:
