@@ -202,8 +202,10 @@ def import_universe_quotes(
 
     print(f"获取已入库的 A 股列表...")
 
-    # 已有当日日线的股票跳过（增量逻辑，只补缺的）
-    cutoff = (_dt.now(_tz.utc) - _td(days=0)).strftime("%Y-%m-%d")
+    # 已有近期日线的股票跳过（增量逻辑，只补缺的）。
+    # A股/港股在未收盘、休市或数据源延迟时不一定有自然日今天的数据；
+    # 这里保留 2 天窗口，避免 2026-06-19 这类无当日日线场景反复重跑全市场。
+    cutoff = (_dt.now(_tz(_td(hours=8))) - _td(days=2)).strftime("%Y-%m-%d")
     recent_codes = set(
         d["_id"] for d in store.db[store.collections["daily_quotes"]].aggregate([
             {"$match": {"trade_date": {"$gte": cutoff}, "period": "daily"}},
@@ -230,10 +232,6 @@ def import_universe_quotes(
         query, {"code": 1, "name": 1, "latest_amount": 1, "_id": 0},
     ).sort("latest_amount", -1).limit(limit))
 
-    if not all_stocks:
-        return {"ok": True, "imported": 0, "skipped": len(recent_codes),
-                "message": "全部大盘股已有近期日线"}
-
     todo = [{"code": s["code"], "name": s.get("name", s["code"]),
              "market": "A股", "asset_type": "stock"} for s in all_stocks]
     skipped = len(recent_codes)
@@ -243,16 +241,21 @@ def import_universe_quotes(
     worker_count = min(max(1, workers), 32)
     sleep_seconds = max(0.0, quote_sleep)
     importer = FactorDataImporter(store, quote_limit=180)
-    print(f"  quote-only 快速导入: workers={worker_count}, quote_sleep={sleep_seconds}s")
-    stats = importer.sync_quotes_only(
-        todo,
-        sleep_seconds=sleep_seconds,
-        workers=worker_count,
-    )
+    stats = {"success": 0, "failed": 0, "items": []}
+    if todo:
+        print(f"  quote-only 快速导入: workers={worker_count}, quote_sleep={sleep_seconds}s")
+        stats = importer.sync_quotes_only(
+            todo,
+            sleep_seconds=sleep_seconds,
+            workers=worker_count,
+        )
+    else:
+        print("  A股行情覆盖池已有近期日线，跳过 A股 导入")
     ok = stats.get("success", 0)
     print(f"  完成: {ok}/{len(todo)}")
 
-    # 港股持仓日线（AKShare stock_hk_daily，免费不限频）
+    # 港股持仓日线：补最近 quote_limit 条，而不是只补自然日 today。
+    # 港股源站可能只更新到上一交易日；若用 today 过滤，会导致旧数据长期补不上。
     hk_stocks = _load_portfolio_hk_stocks()
     if hk_stocks:
         hk_imported = 0
@@ -261,30 +264,11 @@ def import_universe_quotes(
             if code in recent_codes:
                 continue
             try:
-                import akshare as ak
-                df = ak.stock_hk_daily(symbol=code, adjust="qfq")
-                if df is not None and len(df) > 0:
-                    quotes_coll = store.db[store.collections["daily_quotes"]]
-                    cnt = 0
-                    for _, row in df.iterrows():
-                        trade_date = str(row.get("date", ""))
-                        if trade_date < cutoff:
-                            continue
-                        quotes_coll.update_one(
-                            {"code": code, "trade_date": trade_date, "period": "daily"},
-                            {"$set": {
-                                "code": code, "trade_date": trade_date, "period": "daily",
-                                "close": float(row.get("close", 0)),
-                                "open": float(row.get("open", 0)),
-                                "high": float(row.get("high", 0)),
-                                "low": float(row.get("low", 0)),
-                                "volume": float(row.get("volume", 0)),
-                                "data_source": "akshare_hk",
-                                "updated_at": datetime.now(timezone.utc),
-                            }}, upsert=True)
-                        cnt += 1
-                    hk_imported += cnt
-                    print(f"  {code} 港股日线: {cnt} 条")
+                quotes = importer._fetch_hk_quotes({**s, "market": "港股"})
+                cnt = store.upsert_quotes(quotes)
+                hk_imported += cnt
+                latest = max((q.get("trade_date") for q in quotes), default="?")
+                print(f"  {code} 港股日线: {cnt} 条，最新 {latest}")
             except Exception as e:
                 print(f"  {code} 港股日线失败: {e}")
         if hk_imported > 0:
@@ -302,7 +286,7 @@ def _load_portfolio_hk_stocks() -> List[Dict[str, Any]]:
     """从 portfolio.yaml 提取港股代码。"""
     portfolio_path = os.path.join(PROJECT_ROOT, "data", "portfolio.yaml")
     try:
-        with open(portfolio_path) as f:
+        with open(portfolio_path, encoding="utf-8") as f:
             data = yaml.safe_load(f)
         hk = [p for p in (data.get("positions") or []) if p.get("market") == "港股"]
         hk += [w for w in (data.get("watchlist") or []) if w.get("market") == "港股"]
@@ -419,7 +403,7 @@ def _get_tushare_pro():
     try:
         config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                    "..", "config", "config_complete.yaml")
-        with open(config_path) as f:
+        with open(config_path, encoding="utf-8") as f:
             cfg = yaml.safe_load(f)
         token = ((cfg.get("data_sources") or {}).get("tushare") or {}).get("token", "")
         if not token:
@@ -440,7 +424,7 @@ def _get_pool_filters() -> Dict[str, Any]:
     config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                "..", "config", "config_complete.yaml")
     try:
-        with open(config_path) as f:
+        with open(config_path, encoding="utf-8") as f:
             cfg = yaml.safe_load(f)
         pool_cfg = cfg.get("data_sources", {}).get("mongodb", {}).get("stock_pool", {})
 
@@ -496,13 +480,13 @@ def import_dividend_yield(store: MongoFactorDataStore, portfolio_path: str) -> D
     import requests
 
     config_path = os.path.join(PROJECT_ROOT, "config", "config_complete.yaml")
-    with open(config_path) as f:
+    with open(config_path, encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
     token = ((cfg.get("data_sources") or {}).get("tushare") or {}).get("token", "")
     if not token:
         return {"ok": False, "error": "Tushare token 未配置"}
 
-    with open(portfolio_path) as f:
+    with open(portfolio_path, encoding="utf-8") as f:
         pf = yaml.safe_load(f)
     a_codes: List[str] = []
     for pos in pf.get("positions", []) or []:
@@ -572,14 +556,14 @@ def import_hk_southbound(store: MongoFactorDataStore, portfolio_path: str) -> Di
     import requests
 
     config_path = os.path.join(PROJECT_ROOT, "config", "config_complete.yaml")
-    with open(config_path) as f:
+    with open(config_path, encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
     token = ((cfg.get("data_sources") or {}).get("tushare") or {}).get("token", "")
     if not token:
         return {"ok": False, "error": "Tushare token 未配置"}
 
     # 从 portfolio 中提取港股代码
-    with open(portfolio_path) as f:
+    with open(portfolio_path, encoding="utf-8") as f:
         pf = yaml.safe_load(f)
     hk_codes: List[str] = []
     for pos in pf.get("positions", []) or []:
@@ -743,12 +727,55 @@ def import_market_moneyflow(store: MongoFactorDataStore) -> Dict[str, Any]:
     """导入全市场主力资金流向（HTTP API，避免 tushare 包 numpy 兼容问题）。"""
     import requests
 
+    def _import_market_moneyflow_akshare(reason: str) -> Dict[str, Any]:
+        try:
+            import akshare as ak
+
+            df = ak.stock_market_fund_flow()
+        except Exception as exc:
+            return {"ok": False, "error": f"Tushare不可用({reason}); AKShare失败: {exc}"}
+        if df is None or df.empty:
+            return {"ok": False, "error": f"Tushare不可用({reason}); AKShare返回空数据"}
+
+        count = 0
+        for _, row in df.tail(120).iterrows():
+            trade_date = str(row.get("日期", "")).replace("-", "")[:8]
+            if not trade_date:
+                continue
+            doc = {
+                "trade_date": trade_date,
+                "net_amount": _safe_float(row.get("主力净流入-净额"), 0),
+                "buy_elg_amount": _safe_float(row.get("超大单净流入-净额"), 0),
+                "buy_lg_amount": _safe_float(row.get("大单净流入-净额"), 0),
+                "buy_md_amount": _safe_float(row.get("中单净流入-净额"), 0),
+                "buy_sm_amount": _safe_float(row.get("小单净流入-净额"), 0),
+                "close_sh": _safe_float(row.get("上证-收盘价"), 0),
+                "pct_change_sh": _safe_float(row.get("上证-涨跌幅"), 0),
+                "close_sz": _safe_float(row.get("深证-收盘价"), 0),
+                "pct_change_sz": _safe_float(row.get("深证-涨跌幅"), 0),
+                "source": "akshare_stock_market_fund_flow",
+                "fallback_reason": reason,
+                "updated_at": datetime.now(),
+            }
+            store.db["market_moneyflow"].update_one(
+                {"trade_date": trade_date}, {"$set": doc}, upsert=True)
+            count += 1
+
+        latest = str(df.iloc[-1].get("日期", "")).replace("-", "")[:8]
+        return {
+            "ok": True,
+            "imported": count,
+            "latest": latest,
+            "source": "akshare_stock_market_fund_flow",
+            "fallback_reason": reason,
+        }
+
     config_path = os.path.join(PROJECT_ROOT, "config", "config_complete.yaml")
-    with open(config_path) as f:
+    with open(config_path, encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
     token = ((cfg.get("data_sources") or {}).get("tushare") or {}).get("token", "")
     if not token:
-        return {"ok": False, "error": "缺少 Tushare token"}
+        return _import_market_moneyflow_akshare("缺少 Tushare token")
 
     end = datetime.now().strftime("%Y%m%d")
     start = (datetime.now() - timedelta(days=30)).strftime("%Y%m%d")
@@ -765,10 +792,10 @@ def import_market_moneyflow(store: MongoFactorDataStore) -> Dict[str, Any]:
         )
         data = resp.json()
         if data.get("code") != 0:
-            return {"ok": False, "error": data.get("msg", "API错误")}
+            return _import_market_moneyflow_akshare(data.get("msg", "API错误"))
         items = data["data"]["items"]
     except Exception as e:
-        return {"ok": False, "error": str(e)}
+        return _import_market_moneyflow_akshare(str(e))
 
     count = 0
     for item in items:
@@ -891,7 +918,7 @@ def _import_macro_news_tushare(store: MongoFactorDataStore) -> Dict[str, Any]:
     import requests
 
     config_path = os.path.join(PROJECT_ROOT, "config", "config_complete.yaml")
-    with open(config_path) as f:
+    with open(config_path, encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
     token = ((cfg.get("data_sources") or {}).get("tushare") or {}).get("token", "")
     if not token:
@@ -982,7 +1009,7 @@ def import_top_list(store: MongoFactorDataStore) -> Dict[str, Any]:
     import requests
 
     config_path = os.path.join(PROJECT_ROOT, "config", "config_complete.yaml")
-    with open(config_path) as f:
+    with open(config_path, encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
     token = ((cfg.get("data_sources") or {}).get("tushare") or {}).get("token", "")
     if not token:
@@ -1210,7 +1237,10 @@ def data_check(store: MongoFactorDataStore) -> Dict[str, Any]:
             "name": "全市场资金流", "latest": mf_latest, "age_days": mf_age, "status": mf_status,
         })
         if mf_age > 2:
-            result["issues"].append(f"全市场资金流 {mf_age} 天未更新（review会实时拉取兜底）")
+            result["issues"].append(
+                f"全市场资金流 {mf_age} 天未更新（运行 import-market-moneyflow；"
+                "Tushare无权限时会尝试AKShare/Eastmoney兜底）"
+            )
     else:
         result["checks"].append({
             "name": "全市场资金流", "latest": "无", "age_days": "?", "status": "⚠️",
