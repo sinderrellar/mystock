@@ -42,7 +42,7 @@ class BusinessGroupLoader:
         config_dir = os.path.join(PROJECT_ROOT, "config")
 
         # ── 1. 加载行业→组映射 ──
-        with open(os.path.join(config_dir, "industry_groups.yaml")) as f:
+        with open(os.path.join(config_dir, "industry_groups.yaml"), encoding="utf-8") as f:
             raw = yaml.safe_load(f)
 
         self._industry_to_group: Dict[str, str] = {}
@@ -68,7 +68,7 @@ class BusinessGroupLoader:
         self._group_configs: Dict[str, Dict] = {}
         for name in self._group_names:
             path = os.path.join(config_dir, f"{name}.yaml")
-            with open(path) as f:
+            with open(path, encoding="utf-8") as f:
                 self._group_configs[name] = yaml.safe_load(f)
 
     # ── 公开 API ──

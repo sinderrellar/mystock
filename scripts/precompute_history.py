@@ -33,6 +33,8 @@ import yaml as _yaml_lib
 from factor_data_import_service import MongoFactorDataStore, _load_mongodb_config
 
 _UTC = timezone.utc
+_CN_TZ = timezone(timedelta(hours=8))
+MIN_DAILY_QUOTES_FOR_PRECOMPUTE = 50
 
 
 def _to_float(v: Any, default: float = 0.0) -> float:
@@ -40,6 +42,40 @@ def _to_float(v: Any, default: float = 0.0) -> float:
         return float(v) if v is not None else default
     except (TypeError, ValueError):
         return default
+
+
+def _resolve_today_trade_date(
+    store: MongoFactorDataStore,
+    min_quotes: int = MIN_DAILY_QUOTES_FOR_PRECOMPUTE,
+) -> Optional[str]:
+    """Resolve CLI `today` to the latest available trading day in MongoDB.
+
+    Natural today is not always a computable trade date: A shares may be closed,
+    the market may not have finished, or quotes may not have been imported yet.
+    Use the newest daily quote date no later than China-local today with enough
+    coverage, and print the resolution explicitly to avoid silent fallback.
+    """
+    today_cn = datetime.now(_CN_TZ).strftime("%Y-%m-%d")
+    coll = store.db[store.collections["daily_quotes"]]
+    pipeline = [
+        {"$match": {"period": "daily", "trade_date": {"$lte": today_cn}}},
+        {"$group": {"_id": "$trade_date", "count": {"$sum": 1}}},
+        {"$match": {"count": {"$gte": min_quotes}}},
+        {"$sort": {"_id": -1}},
+        {"$limit": 1},
+    ]
+    rows = list(coll.aggregate(pipeline))
+    if not rows:
+        print(f"today={today_cn} 没有找到覆盖数 >= {min_quotes} 的可预计算交易日")
+        return None
+
+    resolved = rows[0]["_id"]
+    count = rows[0]["count"]
+    if resolved == today_cn:
+        print(f"today={today_cn} 已有 {count} 只日线，按今日交易日预计算")
+    else:
+        print(f"today={today_cn} 暂无足够日线，回退到最新可用交易日 {resolved} ({count} 只)")
+    return resolved
 
 
 # ================================================================
@@ -505,7 +541,9 @@ def main():
     # 获取日期列表
     if args.date:
         if args.date == "today":
-            target_date = datetime.now(_UTC).strftime("%Y-%m-%d")
+            target_date = _resolve_today_trade_date(store)
+            if not target_date:
+                return
         else:
             target_date = args.date
         dates = [target_date]
