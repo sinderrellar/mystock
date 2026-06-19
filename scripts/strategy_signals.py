@@ -4,8 +4,9 @@
 Reusable strategy signal aggregation.
 
 This module adapts the existing strategy scripts into optional signal providers.
-Signals never decide trades directly; they support the target-driven decision
-engine in portfolio_strategy.py.
+Signals never decide trades directly. This module is legacy support for the
+old review flow; the new trading chain uses buy_plan → entry → risk → sizing
+→ portfolio_controller.
 """
 import math
 import os

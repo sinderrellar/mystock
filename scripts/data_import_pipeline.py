@@ -1152,20 +1152,29 @@ def data_check(store: MongoFactorDataStore) -> Dict[str, Any]:
             })
             result["issues"].append(f"港股{code}日线: 无数据")
 
-    # 3. 信号缓存
-    sc = store.db["stock_signals"]
-    sig_dates = Counter()
-    for d in sc.find({}, {"computed_at": 1}).sort("computed_at", -1).limit(5000):
-        sig_dates[d["computed_at"]] += 1
-    sig_latest = max(sig_dates.keys()) if sig_dates else "无"
-    sig_age = (_utc_now() - datetime.strptime(str(sig_latest), "%Y-%m-%d").replace(tzinfo=timezone.utc)).days
-    sig_status = "✅" if sig_age <= 2 else ("⚠️" if sig_age <= 4 else "🔴")
-    result["checks"].append({
-        "name": "信号缓存", "latest": sig_latest, "count": sig_dates.get(sig_latest, 0),
-        "age_days": sig_age, "status": sig_status,
-    })
-    if sig_age > 2:
-        result["issues"].append(f"信号缓存 {sig_age} 天未更新")
+    # 3. 新架构预计算缓存：趋势 + 因子
+    for coll_name, label in [("stock_trends", "趋势缓存"), ("stock_factors", "因子缓存")]:
+        coll = store.db[coll_name]
+        dates = Counter()
+        for d in coll.find({}, {"trade_date": 1}).sort("trade_date", -1).limit(5000):
+            if d.get("trade_date"):
+                dates[d["trade_date"]] += 1
+        latest = max(dates.keys()) if dates else "无"
+        if latest == "无":
+            result["checks"].append({
+                "name": label, "latest": latest, "count": 0,
+                "age_days": "?", "status": "🔴",
+            })
+            result["issues"].append(f"{label}: 无数据")
+            continue
+        age = (_utc_now() - datetime.strptime(str(latest), "%Y-%m-%d").replace(tzinfo=timezone.utc)).days
+        status = "✅" if age <= 2 else ("⚠️" if age <= 4 else "🔴")
+        result["checks"].append({
+            "name": label, "latest": latest, "count": dates.get(latest, 0),
+            "age_days": age, "status": status,
+        })
+        if age > 2:
+            result["issues"].append(f"{label} {age} 天未更新")
 
     # 4. 全市场资金流
     mf = store.db["market_moneyflow"]

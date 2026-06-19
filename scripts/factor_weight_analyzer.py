@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-因子权重 IC 分析器 — 用历史信号 + 未来收益计算因子有效性。
+因子权重 IC 分析器 — 用 stock_factors + 未来收益计算因子有效性。
 
 用法:
     # 分析过去 N 天因子 IC，输出建议权重
@@ -76,10 +76,10 @@ def compute_factor_ic(
     if end_date is None:
         end_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
-    dates = sorted(store.db["stock_signals_history"].distinct("computed_at"))
+    dates = sorted(store.db["stock_factors"].distinct("trade_date"))
     dates = [d for d in dates if start_date <= d <= end_date]
     if len(dates) < 3:
-        return {"error": f"历史信号日期不足: {len(dates)} 天", "dates": dates}
+        return {"error": f"stock_factors 历史日期不足: {len(dates)} 天", "dates": dates}
 
     print(f"计算因子 IC: {dates[0]} ~ {dates[-1]}, {len(dates)} 天, forward={forward_days}天")
 
@@ -87,20 +87,22 @@ def compute_factor_ic(
     ic_history: Dict[str, List[float]] = defaultdict(list)
 
     for date in dates:
-        # 取当天所有信号
-        signals = list(store.db["stock_signals_history"].find(
-            {"computed_at": date},
-            {"code": 1, "factor": 1},
+        # 取当天所有因子。每只股票按其业务组使用对应 factor_scores。
+        factor_docs = list(store.db["stock_factors"].find(
+            {"trade_date": date},
+            {"code": 1, "group": 1, "factors": 1},
         ))
-        if len(signals) < 50:
+        if len(factor_docs) < 50:
             continue
 
         # 构建 code → factor_scores 映射
         factor_by_code: Dict[str, Dict[str, float]] = {}
-        for sig in signals:
-            fs = (sig.get("factor") or {}).get("factor_scores", {})
+        for doc in factor_docs:
+            group = doc.get("group") or ""
+            grouped_factor = (doc.get("factors") or {}).get(group, {})
+            fs = grouped_factor.get("factor_scores", {})
             if all(fs.get(f) is not None for f in FACTOR_NAMES):
-                factor_by_code[sig["code"]] = {f: fs[f] for f in FACTOR_NAMES}
+                factor_by_code[doc["code"]] = {f: fs[f] for f in FACTOR_NAMES}
 
         codes = list(factor_by_code.keys())
         if len(codes) < 50:

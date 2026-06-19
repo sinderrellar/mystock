@@ -242,7 +242,7 @@ def run(date: str = None) -> Dict[str, Any]:
     调用昨天写的六个 engine，不替代任何模块的计算。
     """
     from buy_plan import BuyPlanEngine
-    from portfolio_strategy import PortfolioStrategy
+    from portfolio_state_loader import build_live_state
     from risk_engine import evaluate as risk_eval
 
     # ── ① 候选池 ──
@@ -250,36 +250,10 @@ def run(date: str = None) -> Dict[str, Any]:
     bp_result = bp.run(top_n=10, target_date=date, initial_limit=5000, enrich_limit=0)
     candidates = bp_result.get("recommendations", [])
 
-    # ── ② 持仓 review（现有逻辑，完全不动）──
-    ps = PortfolioStrategy()
-    review_result = ps.review()
-
-    # ── ③ 组合级数据（供 risk + sizing）──
-    positions = review_result.get("positions", [])
-    from pymongo import MongoClient
-    _mongo = MongoClient('mongodb://localhost:27017/')['tradingagents']
-    pos_list = []
-    for p in positions:
-        code = p.get("code","")
-        vol = 0.02
-        try:
-            tdoc = _mongo['stock_trends'].find_one({'code': code}, sort=[('trade_date',-1)])
-            if tdoc:
-                vol = (tdoc.get('volatility_20d') or 2.0) / 100  # 百分比→小数
-                vol = max(0.01, min(vol, 0.10))  # 钳位 1%~10%
-        except: pass
-        pos_list.append({"code": code, "weight": p.get("weight_pct",0)/100,
-                        "pnl": p.get("unrealized_pnl_pct",0)/100,
-                        "industry": p.get("industry",""), "volatility": vol})
-    total_w = sum(abs(x["weight"]) for x in pos_list)
-    dd = review_result.get("summary", {}).get("unrealized_pnl_pct", 0)
-    total_equity = review_result.get("summary",{}).get("total_assets",1_000_000)
-    pf_meta = {"total_equity": total_equity, "equity": total_equity,
-               "cash_ratio": max(0, 1 - total_w), "drawdown": dd/100 if dd else 0,
-               "max_drawdown": 0.20, "prev_mode": "NORMAL", "max_risk_budget": 0.60,
-               "positions": {x["code"]: {"weight": x["weight"], "pnl": x["pnl"],
-                                          "volatility": x["volatility"]}
-                             for x in pos_list if x["code"]}}
+    # ── ② 组合级数据（新链路专用，不再调用旧 portfolio_strategy.review）──
+    portfolio_state = build_live_state()
+    pf_meta = portfolio_state["pf_meta"]
+    pos_list = portfolio_state["pos_list"]
     market = {"regime": "neutral", "vol_index": 0.55, "breadth": 0.5}
 
     # ── ④ 逐票 entry + risk + sizing（共享决策链）──
@@ -318,7 +292,7 @@ def run(date: str = None) -> Dict[str, Any]:
 
     return {
         "buy_plan": bp_result,
-        "review": review_result,
+        "portfolio_state": portfolio_state,
         "candidates": enriched,
         "diagnostics": diag,
         "global_mode": ctrl["global_mode"],
@@ -342,7 +316,7 @@ def _build_virtual_pf_meta(
     """从 virtual_portfolio 构造 pf_meta 和 pos_list（回测用）。
 
     与 run() 中的 pf_meta 对应，区别仅在于数据来源：
-    run() 从 PortfolioStrategy.review() 取，这里从 virtual_portfolio 取。
+    run() 从 portfolio_state_loader 取，这里从 virtual_portfolio 取。
     调用前 virtual_portfolio 必须已完成 mark-to-market（weight/unrealized_pnl 已更新）。
     """
     config = config_override or {}
@@ -389,7 +363,7 @@ def run_backtest(
     """回测入口：全链路 buy_plan → entry → risk → sizing。
 
     与 run() 共享 _run_candidates()。区别：
-    - pf_meta 从 virtual_portfolio 构造（而非 PortfolioStrategy.review()）
+    - pf_meta 从 virtual_portfolio 构造（而非 live portfolio_state_loader）
     - universe = candidates + current_positions（持仓股也重新评估）
     - 不调 controller.evaluate()（use_controller=False）
     """

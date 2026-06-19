@@ -6,7 +6,7 @@ Entry Engine — 交易时机层 (Time-Series Entry Timing)
 输入：行情 + 技术信号 + alpha_context
 输出：entry_score + ★评级 + BUY/WAIT
 
-不参与选股（那是 buy_plan），不管理持仓（那是 portfolio_strategy）。
+不参与选股（那是 buy_plan），不管理持仓（那是 portfolio_controller）。
 """
 
 from typing import Any, Dict, Optional

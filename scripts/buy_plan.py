@@ -6,17 +6,9 @@
 
 Buy Plan — Alpha Rank 候选池生成器
 
+职责：生成按 alpha_score 排序的候选池。
 
-
-Layer 1: 趋势过滤 — 中期向上 + 质量不差
-
-Layer 2: 策略匹配 — 动量突破 / 周期共振 / 低位拐点
-
-Layer 3: 入场时机 — RSI不极端 + 近均线 + 短期未过热
-
-Layer 4: 催化剂 — 资金流 + 情绪 + 业绩
-
-Layer 5: 合并输出 Top N
+不做买卖决策；入场许可交给 entry_engine，风险和仓位交给 portfolio_controller。
 
 
 
@@ -216,31 +208,15 @@ class BuyPlanEngine:
 
 
 
-    def __init__(self, historical_snapshot: Optional[Dict[str, Any]] = None):
+    def __init__(self):
 
-        self._hist = historical_snapshot  # 回测模式：预计算的当日快照
+        config_path = os.path.join(PROJECT_ROOT, "config", "config_complete.yaml")
 
-        if historical_snapshot:
+        self.mongo = MongoFactorDataStore(_load_mongodb_config(config_path))
 
-            # 历史模式下跳过 MongoDB 初始化（数据由快照提供）
+        self.data = MarketDataProvider(self.mongo)
 
-            self.mongo = None
-
-            self.data = None
-
-            self.pyramid = None
-
-            self._cached_sector_data = historical_snapshot.get("sector_data", {})
-
-        else:
-
-            config_path = os.path.join(PROJECT_ROOT, "config", "config_complete.yaml")
-
-            self.mongo = MongoFactorDataStore(_load_mongodb_config(config_path))
-
-            self.data = MarketDataProvider(self.mongo)
-
-            self.pyramid = PyramidMultifactorStrategy(config_path)
+        self.pyramid = PyramidMultifactorStrategy(config_path)
 
 
 
@@ -254,19 +230,7 @@ class BuyPlanEngine:
 
     def _broad_screen(self, industries: Optional[List[str]] = None) -> List[Dict[str, Any]]:
 
-        """Layer 0: 生存过滤 — MongoDB 直接查询，和 import_universe_quotes 统一。"""
-
-        if self._hist:
-
-            candidates = self._hist["candidates"]
-
-            if industries:
-
-                candidates = [c for c in candidates if c.get("industry") in industries]
-
-            print(f"Layer0 历史快照: {len(candidates)} 只")
-
-            return candidates
+        """生存过滤：MongoDB 直接查询，和 import_universe_quotes 统一。"""
 
         coll = self.mongo.db[self.mongo.collections["basic_info"]]
 
@@ -316,7 +280,7 @@ class BuyPlanEngine:
 
             })
 
-        print(f"Layer0 生存过滤: {len(raw)} → {len(candidates)} 只")
+        print(f"生存过滤: {len(raw)} → {len(candidates)} 只")
 
         return candidates
 
@@ -334,17 +298,7 @@ class BuyPlanEngine:
 
                 target_date: Optional[str] = None) -> List[Dict[str, Any]]:
 
-        """v3：③因子优先 → ②趋势缓存 + fallback。"""
-
-        if self._hist:
-
-            if len(candidates) > limit:
-
-                candidates = candidates[:limit]
-
-            print(f"  历史模式: {len(candidates)} 只已预计算信号")
-
-            return candidates
+        """v3：因子优先 → 趋势缓存 + fallback。"""
 
         if len(candidates) > limit:
 
@@ -560,10 +514,6 @@ class BuyPlanEngine:
 
         """全市场站上MA20的股票比例（%）。从 stock_trends 读取。"""
 
-        if self._hist:
-
-            return self._hist.get("market_breadth", 50.0)
-
         try:
 
             trends_coll = self.mongo.db["stock_trends"]
@@ -636,11 +586,13 @@ class BuyPlanEngine:
 
         try:
 
-            from portfolio_strategy import PortfolioStrategy
+            from portfolio_state_loader import load_portfolio_yaml
 
-            ps = PortfolioStrategy()
+            data = load_portfolio_yaml()
 
-            return {p["code"] for p in (ps.data.get("positions") or [])}
+            return {str(p.get("code", "")).strip()
+                    for p in (data.get("positions") or [])
+                    if p.get("code")}
 
         except Exception:
 
@@ -674,7 +626,7 @@ class BuyPlanEngine:
 
 
 
-        # Layer 0: 生存过滤（全市场，不抽样）
+        # 生存过滤（全市场，不抽样）
 
         candidates = self._broad_screen(industries=industries)
 
