@@ -23,6 +23,10 @@ DEFAULT_CONFIG = os.path.join(PROJECT_ROOT, "config", "config_complete.yaml")
 DEFAULT_PORTFOLIO = os.path.join(PROJECT_ROOT, "data", "portfolio.yaml")
 
 
+class ConfigError(RuntimeError):
+    """Raised when config_complete.yaml is syntactically or structurally invalid."""
+
+
 def _utc_now() -> datetime:
     return datetime.now(UTC)
 
@@ -48,12 +52,68 @@ def _clean_code(code: Any, market: str = "A股") -> str:
 
 
 def _load_yaml(path: str) -> Dict[str, Any]:
-    with open(path, "r", encoding="utf-8") as file:
-        return yaml.safe_load(file) or {}
+    try:
+        with open(path, "r", encoding="utf-8") as file:
+            data = yaml.safe_load(file) or {}
+    except yaml.YAMLError as exc:
+        mark = getattr(exc, "problem_mark", None)
+        location = f" at line {mark.line + 1}, column {mark.column + 1}" if mark else ""
+        raise ConfigError(f"Invalid YAML in {path}{location}: {exc}") from exc
+    except OSError as exc:
+        raise ConfigError(f"Cannot read config file {path}: {exc}") from exc
+    if not isinstance(data, dict):
+        raise ConfigError(f"Config file {path} must contain a YAML mapping at top level")
+    return data
+
+
+def _require_mapping(root: Dict[str, Any], path: str) -> Dict[str, Any]:
+    node: Any = root
+    for part in path.split("."):
+        if not isinstance(node, dict) or not isinstance(node.get(part), dict):
+            raise ConfigError(f"Missing or invalid mapping: {path}")
+        node = node[part]
+    return node
+
+
+def _require_number(root: Dict[str, Any], path: str) -> float:
+    node: Any = root
+    for part in path.split("."):
+        if not isinstance(node, dict) or part not in node:
+            raise ConfigError(f"Missing numeric config: {path}")
+        node = node[part]
+    if not isinstance(node, (int, float)):
+        raise ConfigError(f"Config {path} must be numeric, got {type(node).__name__}")
+    return float(node)
+
+
+def validate_system_config(config: Dict[str, Any], config_path: str = DEFAULT_CONFIG) -> None:
+    """Validate config blocks that are required by import/backtest pipelines."""
+    mongodb = _require_mapping(config, "data_sources.mongodb")
+    if not mongodb.get("enabled"):
+        raise ConfigError("data_sources.mongodb.enabled must be true")
+    if not mongodb.get("uri"):
+        raise ConfigError("data_sources.mongodb.uri is required")
+    _require_mapping(config, "data_sources.mongodb.collections")
+
+    _require_mapping(config, "pyramid_middle_layer.market_regime.alpha_weights")
+    sizing = _require_mapping(config, "pyramid_middle_layer.position_sizing")
+    _require_number(config, "pyramid_middle_layer.position_sizing.baseline_vol")
+    budget = sizing.get("max_risk_budget")
+    if not isinstance(budget, dict):
+        raise ConfigError("pyramid_middle_layer.position_sizing.max_risk_budget must be a mapping")
+    for key in ("strong", "neutral", "weak"):
+        if not isinstance(budget.get(key), (int, float)):
+            raise ConfigError(f"Missing numeric config: pyramid_middle_layer.position_sizing.max_risk_budget.{key}")
+
+    _require_mapping(config, "pyramid_middle_layer.turnaround.weights")
+    _require_mapping(config, "pyramid_middle_layer.turnaround.forecast_weight")
+    _require_mapping(config, "pyramid_middle_layer.sector_radar")
+    _require_mapping(config, "pyramid_bottom_layer.position_sizing")
 
 
 def _load_mongodb_config(config_path: str) -> Dict[str, Any]:
     config = _load_yaml(config_path)
+    validate_system_config(config, config_path)
     mongodb = ((config.get("data_sources") or {}).get("mongodb") or {})
     if not mongodb.get("enabled"):
         raise RuntimeError("config 中 data_sources.mongodb.enabled 未开启")
@@ -1325,7 +1385,7 @@ def _portfolio_positions(path: str, include_watchlist: bool = False) -> List[Dic
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="同步多因子评分所需的 MongoDB 数据")
-    parser.add_argument("command", choices=["sync-portfolio", "sync-universe-basic"], help="同步多因子输入数据")
+    parser.add_argument("command", choices=["sync-portfolio", "sync-universe-basic", "config-check"], help="同步多因子输入数据")
     parser.add_argument("--portfolio", default=DEFAULT_PORTFOLIO, help="持仓 YAML 文件路径")
     parser.add_argument("--config", default=DEFAULT_CONFIG, help="系统配置 YAML 文件路径")
     parser.add_argument("--include-watchlist", action="store_true", help="同时同步观察池中的股票")
@@ -1333,6 +1393,15 @@ def main() -> None:
     parser.add_argument("--quote-limit", type=int, default=180, help="每只股票保留的日线数量")
     parser.add_argument("--sleep", type=float, default=0.4, help="每只股票同步后的等待秒数，避免请求过快")
     args = parser.parse_args()
+
+    if args.command == "config-check":
+        try:
+            validate_system_config(_load_yaml(args.config), args.config)
+        except ConfigError as exc:
+            print(f"CONFIG_ERROR: {exc}")
+            raise SystemExit(2)
+        print(f"CONFIG_OK: {args.config}")
+        return
 
     mongodb_config = _load_mongodb_config(args.config)
     store = MongoFactorDataStore(mongodb_config)

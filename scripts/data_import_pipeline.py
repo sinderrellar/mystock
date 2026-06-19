@@ -34,10 +34,12 @@ sys.path.insert(0, PROJECT_ROOT)
 sys.path.insert(0, os.path.join(PROJECT_ROOT, "scripts"))
 
 from factor_data_import_service import (
+    ConfigError,
     FactorDataImporter,
     MongoFactorDataStore,
     _load_mongodb_config,
     _load_yaml,
+    validate_system_config,
 )
 
 
@@ -1444,6 +1446,7 @@ def main() -> None:
         "import-industry-moneyflow", "import-market-moneyflow", "import-macro-news",
         "import-top-list", "import-stock-moneyflow", "import-stock-forecast",
         "import-hsgt-flow", "import-sentiment", "import-all", "data-check",
+        "config-check",
     ])
     parser.add_argument("--codes", default="", help="股票代码，逗号分隔（import-stocks 使用）")
     parser.add_argument("--config", default=os.path.join(PROJECT_ROOT, "config", "config_complete.yaml"))
@@ -1452,6 +1455,15 @@ def main() -> None:
     parser.add_argument("--quote-limit", type=int, default=180)
     parser.add_argument("--sleep", type=float, default=0.6)
     args = parser.parse_args()
+
+    if args.command == "config-check":
+        try:
+            validate_system_config(_load_yaml(args.config), args.config)
+        except ConfigError as exc:
+            print(f"CONFIG_ERROR: {exc}")
+            raise SystemExit(2)
+        print(f"CONFIG_OK: {args.config}")
+        return
 
     mongodb_config = _load_mongodb_config(args.config)
     store = MongoFactorDataStore(mongodb_config)
