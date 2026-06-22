@@ -12,6 +12,8 @@ Portfolio Backtest Engine — 组合回测引擎（v3 全链路）
 """
 
 import argparse
+import contextlib
+import io
 import json
 import os
 import sys
@@ -24,6 +26,16 @@ sys.path.insert(0, PROJECT_ROOT)
 sys.path.insert(0, os.path.join(PROJECT_ROOT, "scripts"))
 
 from factor_data_import_service import MongoFactorDataStore, _load_mongodb_config
+
+
+def _holding_days(entry_date: str, exit_date: str) -> int:
+    try:
+        return (
+            datetime.strptime(exit_date, "%Y-%m-%d")
+            - datetime.strptime(entry_date, "%Y-%m-%d")
+        ).days
+    except Exception:
+        return 0
 
 
 # ================================================================
@@ -141,8 +153,13 @@ class PortfolioBacktestEngine:
 
             # ── ③ run_backtest ──
             try:
-                result = run_backtest(date, vp, config_override,
-                                      attribution_mode=self.mode)
+                if verbose:
+                    result = run_backtest(date, vp, config_override,
+                                          attribution_mode=self.mode)
+                else:
+                    with contextlib.redirect_stdout(io.StringIO()):
+                        result = run_backtest(date, vp, config_override,
+                                              attribution_mode=self.mode)
             except Exception as e:
                 if verbose:
                     print(f"— 错误: {e}")
@@ -211,7 +228,7 @@ class PortfolioBacktestEngine:
                         "buy_price": pos["cost"],
                         "sell_price": close,
                         "return_pct": round(ret, 2),
-                        "holding_days": 0,
+                        "holding_days": _holding_days(pos.get("entry_date", ""), final_date),
                     })
             vp["positions"] = {}
             vp["equity"] = vp["cash"]
@@ -306,7 +323,7 @@ class PortfolioBacktestEngine:
                         "buy_price": pos["cost"],
                         "sell_price": close,
                         "return_pct": round(ret, 2),
-                        "holding_days": 0,
+                        "holding_days": _holding_days(pos.get("entry_date", ""), final_date),
                     })
             vp["positions"] = {}
             vp["equity"] = vp["cash"]
@@ -378,8 +395,7 @@ class PortfolioBacktestEngine:
                 sell_value = pos["shares"] * open_price
                 vp["cash"] += sell_value
                 ret = (open_price / pos["cost"] - 1) * 100 if pos["cost"] > 0 else 0
-                holding = (datetime.strptime(date, "%Y-%m-%d") -
-                          datetime.strptime(pos.get("entry_date", date), "%Y-%m-%d")).days
+                holding = _holding_days(pos.get("entry_date", date), date)
                 executed.append({
                     "code": code,
                     "entry_date": pos.get("entry_date", ""),
@@ -641,13 +657,23 @@ def run_attribution(
     for i, date in enumerate(base_engine._trading_days):
         if verbose:
             print(f"  [{i+1}/{len(base_engine._trading_days)}] {date} buy_plan", flush=True)
-        bp_result = bp_engine.run(
-            top_n=top_n,
-            target_date=date,
-            initial_limit=5000,
-            enrich_limit=0,
-            apply_portfolio_penalty=False,
-        )
+        if verbose:
+            bp_result = bp_engine.run(
+                top_n=top_n,
+                target_date=date,
+                initial_limit=5000,
+                enrich_limit=0,
+                apply_portfolio_penalty=False,
+            )
+        else:
+            with contextlib.redirect_stdout(io.StringIO()):
+                bp_result = bp_engine.run(
+                    top_n=top_n,
+                    target_date=date,
+                    initial_limit=5000,
+                    enrich_limit=0,
+                    apply_portfolio_penalty=False,
+                )
         bp_runs += 1
 
         for mode in modes:
