@@ -10,7 +10,7 @@
 - [ ] State Store — 状态持久化（回测/复盘/ML）
 
 ## Strategy Effect Engineering
-- [ ] Recommendation trace: persist daily buy_plan recommendations, scores, market context, pipeline, and run params
-- [ ] Forward test: track T+1 / T+5 / T+20 returns, max drawdown, and entry trigger status
+- [x] Recommendation trace: persist daily buy_plan recommendations, scores, market context, pipeline, and run params
+- [x] Forward test: track T+1 / T+5 / T+20 returns, max drawdown, and entry trigger status
 - [ ] Layer attribution: split baseline / entry / risk / sizing / market regime contribution
 - [ ] Threshold evaluation: tune entry first, then risk, then sizing to avoid global overfitting
