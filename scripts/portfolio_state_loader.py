@@ -132,15 +132,23 @@ def _build_position_rows(
     return rows
 
 
-def build_live_state(path: str = None) -> Dict[str, Any]:
+def build_live_state(
+    path: str = None,
+    mongo_store: MongoFactorDataStore = None,
+    data_provider: MarketDataProvider = None,
+) -> Dict[str, Any]:
     """构造 portfolio_controller.run() 使用的 live 组合状态。"""
     data = load_portfolio_yaml(path)
     account = data.get("account", {})
     positions = data.get("positions", []) or []
 
     config_path = os.path.join(PROJECT_ROOT, "config", "config_complete.yaml")
-    store = MongoFactorDataStore(_load_mongodb_config(config_path))
-    data_provider = MarketDataProvider(store)
+    store = mongo_store or MongoFactorDataStore(
+        _load_mongodb_config(config_path),
+        readonly=True,
+        ensure_indexes=False,
+    )
+    data_provider = data_provider or MarketDataProvider(store)
 
     base_currency = account.get("base_currency", "CNY")
     fx_rates = data_provider.resolve_fx_rates(
@@ -189,7 +197,6 @@ def build_live_state(path: str = None) -> Dict[str, Any]:
         "drawdown": drawdown,
         "max_drawdown": max_drawdown,
         "prev_mode": "NORMAL",
-        "max_risk_budget": 0.60,
         "positions": {
             p["code"]: {
                 "weight": p["weight"],

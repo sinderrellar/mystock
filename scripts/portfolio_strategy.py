@@ -152,7 +152,7 @@ class PortfolioStrategy:
             import os
             config_path = os.path.join(PROJECT_ROOT, "config", "config_complete.yaml")
             mongodb_config = _load_mongodb_config(config_path)
-            store = MongoFactorDataStore(mongodb_config)
+            store = MongoFactorDataStore(mongodb_config, readonly=True, ensure_indexes=False)
             peers = list(store.db[store.collections["basic_info"]].find(
                 query, {"pe": 1, "pb": 1, "_id": 0}
             ))
@@ -207,7 +207,7 @@ class PortfolioStrategy:
 
             config_path = os.path.join(PROJECT_ROOT, "config", "config_complete.yaml")
             mongodb_config = _load_mongodb_config(config_path)
-            store = MongoFactorDataStore(mongodb_config)
+            store = MongoFactorDataStore(mongodb_config, readonly=True, ensure_indexes=False)
 
             # 1. 取所有信号的 composite_score
             signals = list(store.db["stock_signals"].find(
@@ -375,7 +375,7 @@ class PortfolioStrategy:
             from factor_data_import_service import _load_mongodb_config, MongoFactorDataStore
             config_path = os.path.join(PROJECT_ROOT, "config", "config_complete.yaml")
             mongodb_config = _load_mongodb_config(config_path)
-            mongo_store = MongoFactorDataStore(mongodb_config)
+            mongo_store = MongoFactorDataStore(mongodb_config, readonly=True, ensure_indexes=False)
             for row in position_rows + watchlist_rows:
                 code = row.get("code", "")
                 if not code:

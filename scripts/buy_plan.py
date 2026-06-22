@@ -204,11 +204,15 @@ class BuyPlanEngine:
 
 
 
-    def __init__(self):
+    def __init__(self, mongo_store: Optional[MongoFactorDataStore] = None):
 
         config_path = os.path.join(PROJECT_ROOT, "config", "config_complete.yaml")
 
-        self.mongo = MongoFactorDataStore(_load_mongodb_config(config_path))
+        self.mongo = mongo_store or MongoFactorDataStore(
+            _load_mongodb_config(config_path),
+            readonly=True,
+            ensure_indexes=False,
+        )
 
         self.data = MarketDataProvider(self.mongo)
 

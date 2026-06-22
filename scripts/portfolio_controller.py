@@ -25,6 +25,24 @@ def _get_mongo_db():
     return MongoClient(cfg["uri"], serverSelectionTimeoutMS=5000)[cfg["database"]]
 
 
+def _aggregate_entry_pressure(enriched: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Collapse per-stock entry output into one portfolio-level risk input."""
+    active = [
+        item["entry_signal"]
+        for item in enriched
+        if item.get("entry_signal", {}).get("action_type") in ("OPEN", "ADD")
+    ]
+    if not active:
+        return {"action_type": "NONE", "confidence": 0}
+    action = "OPEN" if any(s.get("action_type") == "OPEN" for s in active) else "ADD"
+    confidence = max(float(s.get("confidence", 0) or 0) for s in active)
+    return {
+        "action_type": action,
+        "confidence": confidence,
+        "signal_count": len(active),
+    }
+
+
 # ═══════════════════════════════════════════════════════════════
 # 共享基础设施：run() 和 run_backtest() 共用
 # ═══════════════════════════════════════════════════════════════
@@ -126,7 +144,7 @@ def evaluate(
         portfolio: {equity, cash_ratio, drawdown, positions: {symbol: {weight, pnl, industry}}}
         signals: [{symbol, action_type, confidence}] from entry_engine
         risk: {total_risk, regime, gate} from risk_engine
-        market: {regime, vol_index, breadth}
+        market: {regime, volatility_index, breadth}
 
     Returns:
         {global_mode, actions, constraints, exposures}
@@ -274,24 +292,34 @@ def run(date: str = None) -> Dict[str, Any]:
     调用昨天写的六个 engine，不替代任何模块的计算。
     """
     from buy_plan import BuyPlanEngine
+    from factor_data_import_service import MongoFactorDataStore, _load_mongodb_config
     from portfolio_state_loader import build_live_state
     from risk_engine import evaluate as risk_eval
 
+    mongo_store = MongoFactorDataStore(
+        _load_mongodb_config("config/config_complete.yaml"),
+        readonly=True,
+        ensure_indexes=False,
+    )
+
     # ── ① 候选池 ──
-    bp = BuyPlanEngine()
+    bp = BuyPlanEngine(mongo_store=mongo_store)
     bp_result = bp.run(top_n=10, target_date=date, initial_limit=5000, enrich_limit=0)
     candidates = bp_result.get("recommendations", [])
 
     # ── ② 组合级数据（新链路专用，不再调用旧 portfolio_strategy.review）──
-    portfolio_state = build_live_state()
+    portfolio_state = build_live_state(mongo_store=mongo_store)
     pf_meta = portfolio_state["pf_meta"]
     pos_list = portfolio_state["pos_list"]
     bp_market = bp_result.get("market_context") or bp_result.get("market", {})
     breadth_pct = bp_market.get("breadth_pct", 50)
     regime = bp_market.get("regime", "neutral")
     pf_meta["market_regime"] = regime
-    market = {"regime": regime, "vol_index": 0.55,
-              "breadth": breadth_pct / 100 if isinstance(breadth_pct, (int, float)) else 0.5}
+    market = {
+        "regime": regime,
+        "volatility_index": 0.55,
+        "breadth": breadth_pct / 100 if isinstance(breadth_pct, (int, float)) else 0.5,
+    }
 
     # ── ④ 逐票 entry + risk + sizing（共享决策链）──
     enriched = _run_candidates(candidates, pf_meta, pos_list, market)
@@ -303,8 +331,7 @@ def run(date: str = None) -> Dict[str, Any]:
     ]
 
     # ── ⑤ 组合级评估 ──
-    risk_total = risk_eval(pf_meta, pos_list, market,
-                           all_signals[0] if all_signals else {"action_type":"NONE","confidence":0})
+    risk_total = risk_eval(pf_meta, pos_list, market, _aggregate_entry_pressure(enriched))
     ctrl = evaluate(pf_meta, all_signals, risk_total, market)
 
     # ── ⑥ 诊断表 ──
@@ -503,8 +530,11 @@ def build_backtest_actions(
     breadth_pct = bp_market.get("breadth_pct", 50)
     regime = bp_market.get("regime", "neutral")
     alpha_w = bp_market.get("alpha_weights", {})
-    market = {"regime": regime, "vol_index": 0.55,
-              "breadth": breadth_pct / 100 if isinstance(breadth_pct, (int, float)) else 0.5}
+    market = {
+        "regime": regime,
+        "volatility_index": 0.55,
+        "breadth": breadth_pct / 100 if isinstance(breadth_pct, (int, float)) else 0.5,
+    }
 
     # ── ④ pf_meta ──
     pf_meta, pos_list = _build_virtual_pf_meta(virtual_portfolio, config)

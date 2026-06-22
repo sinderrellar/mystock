@@ -1497,7 +1497,7 @@ def main() -> None:
         "import-industry-moneyflow", "import-market-moneyflow", "import-macro-news",
         "import-top-list", "import-stock-moneyflow", "import-stock-forecast",
         "import-hsgt-flow", "import-sentiment", "import-all", "data-check",
-        "config-check",
+        "config-check", "repair-quote-schema",
     ])
     parser.add_argument("--codes", default="", help="股票代码，逗号分隔（import-stocks 使用）")
     parser.add_argument("--config", default=os.path.join(PROJECT_ROOT, "config", "config_complete.yaml"))
@@ -1523,7 +1523,10 @@ def main() -> None:
     mongodb_config = _load_mongodb_config(args.config)
     store = MongoFactorDataStore(mongodb_config)
 
-    if args.command == "import-portfolio":
+    if args.command == "repair-quote-schema":
+        print(store.repair_daily_quote_schema())
+
+    elif args.command == "import-portfolio":
         import_portfolio(args.portfolio, store, quote_limit=args.quote_limit or 180, sleep_seconds=args.sleep)
 
     elif args.command == "import-stocks":

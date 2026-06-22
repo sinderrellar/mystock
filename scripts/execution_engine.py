@@ -49,7 +49,7 @@ def plan(
 
     # ── ② 市场环境 ──
     regime = market.get("regime", "neutral")
-    vol = market.get("vol_index", 0.5)
+    vol = market.get("volatility_index", market.get("vol_index", 0.5))
     liquidity = market.get("liquidity", "normal")
     spread_bp = market.get("spread_bp", 5)
 

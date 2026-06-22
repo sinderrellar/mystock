@@ -142,7 +142,13 @@ class MongoFactorDataStore:
     连接管理、索引创建和基础 CRUD 由此类统一提供。
     """
 
-    def __init__(self, mongodb_config: Dict[str, Any]):
+    def __init__(
+        self,
+        mongodb_config: Dict[str, Any],
+        *,
+        ensure_indexes: bool = True,
+        readonly: bool = False,
+    ):
         from pymongo import MongoClient
 
         self.client = MongoClient(mongodb_config["uri"], serverSelectionTimeoutMS=5000)
@@ -150,7 +156,9 @@ class MongoFactorDataStore:
         self.db = self.client[mongodb_config["database"]]
         self.collections = mongodb_config["collections"]
         self.available = True
-        self._ensure_indexes()
+        self.readonly = readonly
+        if ensure_indexes and not readonly:
+            self._ensure_indexes()
 
     def _ensure_indexes(self) -> None:
         basic = self.db[self.collections["basic_info"]]
@@ -160,6 +168,7 @@ class MongoFactorDataStore:
         basic.create_index([("code", 1)], name="code_index")
         basic.create_index([("market", 1)], name="market_index")
         basic.create_index([("updated_at", -1)], name="updated_at_index")
+        self._repair_daily_quote_schema(quotes)
         quotes.create_index(
             [("code", 1), ("trade_date", 1), ("data_source", 1), ("period", 1)],
             unique=True,
@@ -172,6 +181,50 @@ class MongoFactorDataStore:
             name="code_period_source_unique",
         )
         financial.create_index([("code", 1), ("report_period", -1)], name="code_period_index")
+
+    def _repair_daily_quote_schema(self, quotes) -> None:
+        """Normalize quote identity to `code` before creating/updating indexes.
+
+        Older databases may still carry unique `symbol+trade_date+source+period`
+        indexes from legacy data pipelines. The current project reads and writes
+        daily quotes by `code`; `symbol` is kept as a compatibility alias only.
+        """
+        try:
+            quotes.update_many(
+                {
+                    "code": {"$exists": True, "$ne": None},
+                    "$or": [
+                        {"symbol": {"$exists": False}},
+                        {"symbol": None},
+                        {"symbol": ""},
+                    ],
+                },
+                [{"$set": {"symbol": "$code"}}],
+            )
+        except Exception:
+            # Index creation should still be attempted; callers that need strict
+            # migrations can run the repair command directly.
+            pass
+
+        try:
+            existing = {idx["name"]: idx for idx in quotes.list_indexes()}
+            if "symbol_date_source_period_unique" in existing:
+                quotes.drop_index("symbol_date_source_period_unique")
+        except Exception:
+            pass
+
+    def repair_daily_quote_schema(self) -> Dict[str, Any]:
+        """Repair daily quote identity fields/indexes and return current status."""
+        quotes = self.db[self.collections["daily_quotes"]]
+        self._repair_daily_quote_schema(quotes)
+        indexes = [idx["name"] for idx in quotes.list_indexes()]
+        return {
+            "ok": True,
+            "collection": self.collections["daily_quotes"],
+            "indexes": indexes,
+            "symbol_missing": quotes.count_documents({"symbol": {"$exists": False}}),
+            "symbol_null": quotes.count_documents({"symbol": None}),
+        }
 
     def upsert_basic(self, doc: Dict[str, Any]) -> None:
         now = _utc_now()
@@ -205,6 +258,9 @@ class MongoFactorDataStore:
                 "period": doc.get("period", "daily"),
                 "updated_at": now,
             }
+            if not full_doc.get("code"):
+                continue
+            full_doc.setdefault("symbol", full_doc["code"])
             full_doc.setdefault("created_at", now)
             operations.append(
                 ReplaceOne(

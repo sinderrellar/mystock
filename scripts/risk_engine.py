@@ -62,7 +62,11 @@ def evaluate(
         portfolio.get("max_drawdown", cfg.get("target_drawdown", 0.20)),
     )
     dd_pressure = min(1.0, dd / max_dd) if max_dd > 0 else 0
-    vol_penalty = market.get("volatility_index", cfg.get("default_volatility_index", 0.5)) * cfg.get("drawdown_vol_penalty_weight", 0.5)
+    market_vol = market.get(
+        "volatility_index",
+        market.get("vol_index", cfg.get("default_volatility_index", 0.5)),
+    )
+    vol_penalty = market_vol * cfg.get("drawdown_vol_penalty_weight", 0.5)
     drawdown_risk = min(1.0, dd_pressure + vol_penalty)
 
     # ── ② 集中度风险 ──
@@ -79,7 +83,7 @@ def evaluate(
     )
 
     # ── ③ 波动风险 ──
-    vol = market.get("volatility_index", cfg.get("default_volatility_index", 0.5))
+    vol = market_vol
     if vol > cfg.get("vol_high", 0.7):
         vol_risk = cfg.get("vol_high_score", 1.0)
     elif vol > cfg.get("vol_mid", 0.4):

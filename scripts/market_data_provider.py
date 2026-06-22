@@ -158,7 +158,11 @@ class MarketDataProvider:
             )
             mongodb_config = _load_mongodb_config(config_path)
             from factor_data_import_service import MongoFactorDataStore
-            self._mongo_store = MongoFactorDataStore(mongodb_config)
+            self._mongo_store = MongoFactorDataStore(
+                mongodb_config,
+                readonly=True,
+                ensure_indexes=False,
+            )
         except Exception as exc:
             self._mongo_store_error = str(exc)
 
@@ -1867,7 +1871,11 @@ class MarketDataProvider:
                 "config", "config_complete.yaml",
             )
             mongodb_config = _load_mongodb_config(config_path)
-            store = MongoFactorDataStore(mongodb_config)
+            store = MongoFactorDataStore(
+                mongodb_config,
+                readonly=True,
+                ensure_indexes=False,
+            )
             coll = store.db[store.collections.get("hsgt_flow", "stock_hsgt_flow")]
 
             rows = list(coll.find(
