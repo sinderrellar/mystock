@@ -6,9 +6,11 @@
 
 Buy Plan — Alpha Rank 候选池生成器
 
-职责：生成按 alpha_score 排序的候选池。
+职责：全市场生存过滤 → 补齐预计算因子 → 根据市场宽度动态加权
+momentum/cycle/turnaround → 输出 Top N 候选。
 
-不做买卖决策；入场许可交给 entry_engine，风险和仓位交给 portfolio_controller。
+不做买卖决策、不做入场许可、不做仓位管理；这些由
+entry_engine / risk_engine / sizing_engine / portfolio_controller 负责。
 
 
 
@@ -27,8 +29,6 @@ import json
 import os
 
 import sys
-
-import time
 
 from datetime import datetime, timezone
 
@@ -73,10 +73,6 @@ def _get_buy_plan_config() -> Dict[str, Any]:
 from factor_data_import_service import _load_mongodb_config, MongoFactorDataStore
 
 from market_data_provider import MarketDataProvider
-
-from pyramid_multifactor_strategy import PyramidMultifactorStrategy
-
-from business_group_loader import BusinessGroupLoader
 
 def _utc_now() -> datetime:
 
@@ -216,8 +212,6 @@ class BuyPlanEngine:
 
         self.data = MarketDataProvider(self.mongo)
 
-        self.pyramid = PyramidMultifactorStrategy(config_path)
-
 
 
     # ================================================================
@@ -230,7 +224,7 @@ class BuyPlanEngine:
 
     def _broad_screen(self, industries: Optional[List[str]] = None) -> List[Dict[str, Any]]:
 
-        """生存过滤：MongoDB 直接查询，和 import_universe_quotes 统一。"""
+        """Layer 0: 生存过滤 — MongoDB 直接查询，和 import_universe_quotes 统一。"""
 
         coll = self.mongo.db[self.mongo.collections["basic_info"]]
 
@@ -298,15 +292,11 @@ class BuyPlanEngine:
 
                 target_date: Optional[str] = None) -> List[Dict[str, Any]]:
 
-        """v3：因子优先 → 趋势缓存 + fallback。"""
+        """v3：③因子优先 → ②趋势缓存 + fallback。"""
 
         if len(candidates) > limit:
 
             candidates = candidates[:limit]
-
-
-
-        from datetime import timezone as _tz, timedelta as _td
 
 
 
@@ -815,6 +805,18 @@ class BuyPlanEngine:
             },
 
             "recommendations": final,
+
+            "market_context": {
+
+                "breadth_pct": breadth_pct,
+
+                "regime": regime,
+
+                "alpha_weights": alpha_w,
+
+                "weak_min_cycle": weak_min_cycle,
+
+            },
 
             "market": {
 

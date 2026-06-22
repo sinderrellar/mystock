@@ -52,7 +52,7 @@ def calculate(
     action = signal.get("action_type", "NONE")
     confidence = signal.get("confidence", 0)
     pos_mult = risk_gate.get("position_multiplier", 0.5)
-    equity = portfolio.get("equity", 1000000)
+    equity = portfolio.get("equity", portfolio.get("total_equity", 1000000))
     drawdown = abs(portfolio.get("drawdown", 0))
     positions = portfolio.get("positions", {})
     current = positions.get(symbol, {})

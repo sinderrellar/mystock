@@ -17,6 +17,14 @@ import json
 from engine_config import load_middle_config
 
 
+def _get_mongo_db():
+    from factor_data_import_service import _load_mongodb_config
+    from pymongo import MongoClient
+
+    cfg = _load_mongodb_config("config/config_complete.yaml")
+    return MongoClient(cfg["uri"], serverSelectionTimeoutMS=5000)[cfg["database"]]
+
+
 # ═══════════════════════════════════════════════════════════════
 # 共享基础设施：run() 和 run_backtest() 共用
 # ═══════════════════════════════════════════════════════════════
@@ -35,7 +43,7 @@ def _build_entry_input(candidate: Dict[str, Any]) -> Dict[str, Any]:
     ti = trend.get("technical_indicators", {}) or {}
     return {
         "trend_signal": {
-            "available": True,
+            "available": bool(trend.get("available", False)),
             "ma": trend.get("ma", {}),
             "returns": trend.get("returns", {}),
             "rsi14": ti.get("rsi14"),
@@ -65,12 +73,11 @@ def _run_decision_chain(
 
     stock = _build_entry_input(candidate)
     entry = entry_eval(stock)
-    risk = risk_eval(pf_meta, pos_list, market, entry["signal"])
-    # sizing_engine 需要 state_snapshot 中的 volatility_20d 做高波少买
     signal_with_snapshot = {
         **entry["signal"],
         "state_snapshot": entry.get("state_snapshot", {}),
     }
+    risk = risk_eval(pf_meta, pos_list, market, signal_with_snapshot)
     sizing = sizing_calc(signal_with_snapshot, risk["gate"], pf_meta, candidate["code"])
 
     alpha = stock["alpha_context"]
@@ -82,7 +89,7 @@ def _run_decision_chain(
         "momentum": alpha["momentum"],
         "cycle": alpha["cycle"],
         "turnaround": alpha["turnaround"],
-        "entry_signal": entry["signal"],
+        "entry_signal": signal_with_snapshot,
         "entry_score": entry["entry_score"],
         "technical_score": entry["technical_score"],
         "alpha_bonus": entry["alpha_bonus"],
@@ -279,7 +286,12 @@ def run(date: str = None) -> Dict[str, Any]:
     portfolio_state = build_live_state()
     pf_meta = portfolio_state["pf_meta"]
     pos_list = portfolio_state["pos_list"]
-    market = {"regime": "neutral", "vol_index": 0.55, "breadth": 0.5}
+    bp_market = bp_result.get("market_context") or bp_result.get("market", {})
+    breadth_pct = bp_market.get("breadth_pct", 50)
+    regime = bp_market.get("regime", "neutral")
+    pf_meta["market_regime"] = regime
+    market = {"regime": regime, "vol_index": 0.55,
+              "breadth": breadth_pct / 100 if isinstance(breadth_pct, (int, float)) else 0.5}
 
     # ── ④ 逐票 entry + risk + sizing（共享决策链）──
     enriched = _run_candidates(candidates, pf_meta, pos_list, market)
@@ -372,6 +384,7 @@ def _build_virtual_pf_meta(
         "prev_mode": "NORMAL",
         "max_risk_budget": config.get("max_risk_budget", 0.60),
         "baseline_vol": config.get("baseline_vol", 0.025),
+        "market_regime": config.get("market_regime", "neutral"),
         "positions": {
             x["code"]: {"weight": x["weight"], "pnl": x["pnl"], "volatility": x["volatility"]}
             for x in pos_list if x["code"]
@@ -451,8 +464,7 @@ def build_backtest_actions(
     existing_codes = {c["code"] for c in candidates}
 
     # 为不在候选池的持仓股构造轻量 candidate，让其也能过决策链
-    from pymongo import MongoClient
-    _mongo = MongoClient('mongodb://localhost:27017/')['tradingagents']
+    _mongo = _get_mongo_db()
     for code, pos in current_positions.items():
         if code not in existing_codes:
             factor_doc = _mongo['stock_factors'].find_one(
@@ -473,6 +485,7 @@ def build_backtest_actions(
                     "factor": (factor_doc.get("factors") or {}).get(
                         factor_doc.get("group", ""), {"factor_scores": {"momentum": 0.5}}),
                     "trend": {
+                        "available": trend_doc.get("available", False),
                         "ma": trend_doc.get("ma", {}),
                         "returns": trend_doc.get("returns", {}),
                         "technical_indicators": {
@@ -486,7 +499,7 @@ def build_backtest_actions(
                 })
 
     # ── ③ market（直接复用 buy_plan 计算的 regime，不复推）──
-    bp_market = bp_result.get("market", {})
+    bp_market = bp_result.get("market_context") or bp_result.get("market", {})
     breadth_pct = bp_market.get("breadth_pct", 50)
     regime = bp_market.get("regime", "neutral")
     alpha_w = bp_market.get("alpha_weights", {})
@@ -495,6 +508,7 @@ def build_backtest_actions(
 
     # ── ④ pf_meta ──
     pf_meta, pos_list = _build_virtual_pf_meta(virtual_portfolio, config)
+    pf_meta["market_regime"] = regime
 
     # ── ⑤ 决策链 ──
     decisions = _run_candidates(universe, pf_meta, pos_list, market)

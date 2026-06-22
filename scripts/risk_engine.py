@@ -24,7 +24,7 @@ def evaluate(
     """评估当前系统风险状态。
 
     Args:
-        portfolio: {total_equity, cash, drawdown, target_dd}
+        portfolio: {total_equity, cash, drawdown, target_dd/max_drawdown}
         positions: [{code, weight, pnl, industry}]
         market: {volatility_index, breadth, sector_heat}
         entry_signal: {action_type, confidence} from entry_engine
@@ -57,7 +57,10 @@ def evaluate(
 
     # ── ① 回撤风险 ──
     dd = abs(portfolio.get("drawdown", 0))
-    max_dd = portfolio.get("target_dd", cfg.get("target_drawdown", 0.20))
+    max_dd = portfolio.get(
+        "target_dd",
+        portfolio.get("max_drawdown", cfg.get("target_drawdown", 0.20)),
+    )
     dd_pressure = min(1.0, dd / max_dd) if max_dd > 0 else 0
     vol_penalty = market.get("volatility_index", cfg.get("default_volatility_index", 0.5)) * cfg.get("drawdown_vol_penalty_weight", 0.5)
     drawdown_risk = min(1.0, dd_pressure + vol_penalty)
@@ -96,9 +99,9 @@ def evaluate(
 
     # ── 市场风险 ──
     mkt_regime = market.get("regime", "neutral")
-    if mkt_regime == "cooling":
+    if mkt_regime in ("cooling", "weak"):
         market_risk = cfg.get("market_cooling_risk", 0.2)
-    elif mkt_regime == "improving":
+    elif mkt_regime in ("improving", "strong"):
         market_risk = cfg.get("market_improving_risk", -0.1)
     else:
         market_risk = 0.0
