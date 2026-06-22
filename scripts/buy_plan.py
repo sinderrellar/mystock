@@ -528,9 +528,11 @@ class BuyPlanEngine:
 
             price_map = {}
 
+            price_query = {"trade_date": td, "period": "daily", "data_source": self.mongo.quote_source}
+
             for pdoc in price_coll.find(
 
-                {"trade_date": td, "period": "daily"},
+                price_query,
 
                 {"code": 1, "close": 1, "_id": 0}
 

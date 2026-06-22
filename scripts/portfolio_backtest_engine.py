@@ -47,13 +47,15 @@ class PriceProvider:
 
     def __init__(self, mongo: MongoFactorDataStore):
         self.coll = mongo.db[mongo.collections["daily_quotes"]]
+        self.quote_source = mongo.quote_source
         self._cache = {}
 
     def get_open(self, code: str, date: str) -> float:
         key = (code, date, "open")
         if key not in self._cache:
+            query = {"code": code, "period": "daily", "trade_date": date, "data_source": self.quote_source}
             doc = self.coll.find_one(
-                {"code": code, "period": "daily", "trade_date": date},
+                query,
                 {"open": 1, "_id": 0})
             self._cache[key] = (doc.get("open", 0) if doc else 0) or 0
         return self._cache[key]
@@ -61,8 +63,9 @@ class PriceProvider:
     def get_close(self, code: str, date: str) -> float:
         key = (code, date, "close")
         if key not in self._cache:
+            query = {"code": code, "period": "daily", "trade_date": date, "data_source": self.quote_source}
             doc = self.coll.find_one(
-                {"code": code, "period": "daily", "trade_date": date},
+                query,
                 {"close": 1, "_id": 0})
             self._cache[key] = (doc.get("close", 0) if doc else 0) or 0
         return self._cache[key]
@@ -97,7 +100,8 @@ class PortfolioBacktestEngine:
     def _load_trading_days(self) -> List[str]:
         """加载 trading days 列表（从 stock_factors + daily_quotes 交集）。"""
         factor_dates = set(self.mongo.db["stock_factors"].distinct("trade_date"))
-        quote_dates = set(self.mongo.db[self.mongo.collections["daily_quotes"]].distinct("trade_date"))
+        quote_query: Dict[str, Any] = {"data_source": self.mongo.quote_source}
+        quote_dates = set(self.mongo.db[self.mongo.collections["daily_quotes"]].distinct("trade_date", quote_query))
         all_dates = sorted(factor_dates & quote_dates)
         return [d for d in all_dates if self.start_date <= d <= self.end_date]
 

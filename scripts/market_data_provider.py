@@ -9,7 +9,7 @@ strategy_signals、pyramid、event_driven）只依赖此类，不感知底层数
 数据维度：
   get_price()           实时价格       Tencent → Sina → Eastmoney → AKShare → Yahoo
   get_quote_snapshot()  报价快照       Yahoo (PE/PB/股息/市值) + MongoDB fallback
-  get_bars()            历史K线        MongoDB → Yahoo
+  get_bars()            历史K线        MongoDB canonical source
   get_trend_signal()    趋势+技术指标   基于 bars 计算
   get_financial()       财务数据       MongoDB
   get_stock_info()      股票基础信息    MongoDB
@@ -634,14 +634,15 @@ class MarketDataProvider:
         return number
 
     # ================================================================
-    # 3. 历史K线 — MongoDB → Yahoo
+    # 3. 历史K线 — MongoDB canonical source
     # ================================================================
 
     def get_bars(self, code: str, market: str, days: int = 120,
                  as_of_date: Optional[str] = None) -> Dict[str, Any]:
         """获取历史日线 K 线（倒序，最新在前）。
 
-        MongoDB 缓存优先；若无数据或数据过期，自动走 Yahoo 补齐。
+        只读取 MongoDB 中的 canonical 日线源。缺数据时显式返回 stale，
+        不自动拉取或回写其他行情源。
 
         Args:
             as_of_date: 历史回测截止日期，K线数据不晚于此日（防 look-ahead bias）。
@@ -659,101 +660,14 @@ class MarketDataProvider:
                 result["source"] = "mongodb"
                 age = _data_age_days(result["data_date"])
                 result["stale"] = (age is not None and age > 1)
-                if not result["stale"]:
-                    return result
-                # MongoDB 数据过期，继续走 Yahoo 补齐
-                result["stale_reason"] = f"数据截止 {result['data_date']}（{age:.0f}天前）"
-
-        # MongoDB 无数据或过期 → Yahoo Finance fallback
-        for yahoo_symbol in self._yahoo_symbols(code, market):
-            yahoo_bars = self._get_yahoo_bars(yahoo_symbol, days)
-            if not yahoo_bars:
-                continue
-            yahoo_date = yahoo_bars[0].get("trade_date", "")
-            # 优先用 Yahoo 数据（转 datetime 比较，兼容 "20260607" 和 "2026-06-07" 格式）
-            yahoo_dt = _parse_date(yahoo_date)
-            mongo_dt = _parse_date(result["data_date"]) if result["data_date"] else None
-            if yahoo_dt and (not mongo_dt or yahoo_dt > mongo_dt):
-                result["bars"] = yahoo_bars
-                result["data_date"] = yahoo_date
-                result["source"] = "yahoo"
-                age = _data_age_days(yahoo_date)
-                result["stale"] = (age is not None and age > 1)
                 if result["stale"]:
-                    result["stale_reason"] = f"数据截止 {yahoo_date}（{age:.0f}天前）"
-                # 回写 MongoDB，下次直接命中
-                self._write_bars_to_mongo(code, yahoo_bars)
-            break  # 第一个命中即可
+                    result["stale_reason"] = f"canonical 日线截止 {result['data_date']}（{age:.0f}天前）"
+                return result
 
         if not result["bars"]:
             result["stale"] = True
-            result["stale_reason"] = "无可用K线数据（MongoDB + Yahoo 均无数据）"
+            result["stale_reason"] = "无 canonical K线数据，请先运行 import-quotes"
         return result
-
-    def _get_yahoo_bars(self, symbol: str, days: int) -> List[Dict[str, Any]]:
-        cache_key = f"{symbol}:{days}"
-        if cache_key in self._yahoo_bars_cache:
-            return self._yahoo_bars_cache[cache_key]
-
-        params = urllib.parse.urlencode({"range": "1y", "interval": "1d"})
-        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{urllib.parse.quote(symbol)}?{params}"
-        request = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-        try:
-            with urllib.request.urlopen(request, timeout=8) as response:
-                payload = json.loads(response.read().decode("utf-8"))
-        except Exception:
-            return []
-
-        chart = payload.get("chart", {})
-        if chart.get("error"):
-            return []
-
-        results = chart.get("result") or []
-        if not results:
-            return []
-
-        timestamps = results[0].get("timestamp") or []
-        quote = ((results[0].get("indicators") or {}).get("quote") or [{}])[0]
-        closes = quote.get("close") or []
-        opens = quote.get("open") or []
-        highs = quote.get("high") or []
-        lows = quote.get("low") or []
-        volumes = quote.get("volume") or []
-
-        bars: List[Dict[str, Any]] = []
-        for i, ts in enumerate(timestamps):
-            close = _to_float(closes[i] if i < len(closes) else None)
-            if close <= 0:
-                continue
-            bars.append({
-                "trade_date": datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d"),
-                "open": _to_float(opens[i] if i < len(opens) else None),
-                "high": _to_float(highs[i] if i < len(highs) else None),
-                "low": _to_float(lows[i] if i < len(lows) else None),
-                "close": close,
-                "volume": _to_float(volumes[i] if i < len(volumes) else None),
-                "data_source": "yahoo",
-            })
-
-        # 截取最近 days 条，倒序
-        bars = bars[-days:][::-1]
-        self._yahoo_bars_cache[cache_key] = bars
-        return bars
-
-    def _write_bars_to_mongo(self, code: str, bars: List[Dict[str, Any]]) -> None:
-        """将 Yahoo 获取的 bars 回写到 MongoDB，补全 code + period 字段。"""
-        if not self.mongo_available:
-            return
-        try:
-            docs = [
-                {**bar, "code": code, "symbol": code, "period": "daily"}
-                for bar in bars
-            ]
-            n = self.mongo.upsert_quotes(docs)
-            if n > 0:
-                logger.info(f"Yahoo 回写 MongoDB: {code} {n} 条")
-        except Exception as e:
-            logger.warning(f"Yahoo 回写 MongoDB 失败 ({code}): {e}")
 
     # ================================================================
     # 4. 趋势+技术指标 — 基于 bars 计算

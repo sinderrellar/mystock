@@ -110,8 +110,9 @@ def compute_factor_ic(
 
         # 取 forward_days 后的收盘价
         # 找到 forward_days 个交易日后的日期
+        future_query = {"code": {"$in": codes}, "trade_date": {"$gt": date}, "period": "daily", "data_source": store.quote_source}
         future_quotes = list(store.db[store.collections["daily_quotes"]].find(
-            {"code": {"$in": codes}, "trade_date": {"$gt": date}, "period": "daily"},
+            future_query,
             {"code": 1, "trade_date": 1, "close": 1},
         ).sort("trade_date", 1))
 
@@ -130,8 +131,9 @@ def compute_factor_ic(
 
         # 取当天收盘价
         current_price: Dict[str, float] = {}
+        current_query = {"code": {"$in": codes}, "trade_date": date, "period": "daily", "data_source": store.quote_source}
         for q in store.db[store.collections["daily_quotes"]].find(
-            {"code": {"$in": codes}, "trade_date": date, "period": "daily"},
+            current_query,
             {"code": 1, "close": 1},
         ):
             close = q.get("close", 0)

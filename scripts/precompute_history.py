@@ -99,7 +99,7 @@ def _compute_date(store: MongoFactorDataStore, target_date: str,
         {"code": 1, "close": 1, "volume": 1, "amount": 1, "_id": 0},
     ))
     if len(price_docs) < 50:
-        return {"ok": False, "error": f"{target_date} 仅 {len(price_docs)} 只股票有行情，请先运行 data_import_pipeline.py import-universe-quotes"}
+        return {"ok": False, "error": f"{target_date} 仅 {len(price_docs)} 只股票有行情，请先运行 data_import_pipeline.py import-quotes"}
 
     price_map: Dict[str, Dict[str, float]] = {}
     for doc in price_docs:
@@ -411,8 +411,9 @@ def _compute_date(store: MongoFactorDataStore, target_date: str,
                 # 成交量确认：量比（当期量/20日均量）百分位
                 vol_today = price_map.get(code, {}).get("volume", 0)
                 vol_avg = 0
+                quote_query = {"code": code, "trade_date": {"$lte": target_date}, "data_source": store.quote_source}
                 quotes = store.db[store.collections["daily_quotes"]].find(
-                    {"code": code, "trade_date": {"$lte": target_date}},
+                    quote_query,
                     {"volume": 1}
                 ).sort("trade_date", -1).limit(20)
                 vol_list = [q.get("volume", 0) for q in quotes]
@@ -422,8 +423,9 @@ def _compute_date(store: MongoFactorDataStore, target_date: str,
                 # 量比百分位（全市场）
                 vol_ratios_all = []
                 for c2 in codes[:200]:  # 采样200只算分布
+                    sample_query = {"code": c2, "trade_date": {"$lte": target_date}, "data_source": store.quote_source}
                     qq = list(store.db[store.collections["daily_quotes"]].find(
-                        {"code": c2, "trade_date": {"$lte": target_date}},
+                        sample_query,
                         {"volume": 1}
                     ).sort("trade_date", -1).limit(20))
                     if len(qq) >= 5:

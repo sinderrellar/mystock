@@ -11,8 +11,7 @@ runtime surface.
 import argparse
 import os
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from functools import partial
 from typing import Any, Dict, Iterable, List, Optional
 
@@ -22,6 +21,7 @@ import yaml
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_CONFIG = os.path.join(PROJECT_ROOT, "config", "config_complete.yaml")
 DEFAULT_PORTFOLIO = os.path.join(PROJECT_ROOT, "data", "portfolio.yaml")
+CANONICAL_QUOTE_SOURCE = "tushare"
 
 
 class ConfigError(RuntimeError):
@@ -155,6 +155,7 @@ class MongoFactorDataStore:
         self.client.admin.command("ping")
         self.db = self.client[mongodb_config["database"]]
         self.collections = mongodb_config["collections"]
+        self.quote_source = CANONICAL_QUOTE_SOURCE
         self.available = True
         self.readonly = readonly
         if ensure_indexes and not readonly:
@@ -301,7 +302,7 @@ class MongoFactorDataStore:
 
     def get_latest_quote(self, code: str) -> Optional[Dict[str, Any]]:
         return self.db[self.collections["daily_quotes"]].find_one(
-            {"code": code, "period": "daily"},
+            {"code": code, "period": "daily", "data_source": CANONICAL_QUOTE_SOURCE},
             sort=[("trade_date", -1)],
         )
 
@@ -309,6 +310,7 @@ class MongoFactorDataStore:
         return self.db[self.collections["daily_quotes"]].count_documents({
             "code": code,
             "period": "daily",
+            "data_source": CANONICAL_QUOTE_SOURCE,
         }, limit=limit)
 
     def get_latest_financial(self, code: str) -> Optional[Dict[str, Any]]:
@@ -352,7 +354,11 @@ class MongoFactorDataStore:
                           as_of_date: Optional[str] = None) -> List[Dict[str, Any]]:
         """获取近期日线行情（倒序，最新在前）。as_of_date 限制日期上限。"""
         try:
-            query: Dict[str, Any] = {"code": code, "period": "daily"}
+            query: Dict[str, Any] = {
+                "code": code,
+                "period": "daily",
+                "data_source": CANONICAL_QUOTE_SOURCE,
+            }
             if as_of_date:
                 query["trade_date"] = {"$lte": as_of_date}
             cursor = self.db[self.collections["daily_quotes"]].find(
@@ -473,66 +479,6 @@ class FactorDataImporter:
                 time.sleep(sleep_seconds)
             if total >= 50 and (i + 1) % 100 == 0:
                 print(f"  进度: {i+1}/{total} (成功 {stats['success']}, 失败 {stats['failed']})")
-        return stats
-
-    def sync_quotes_only(
-        self,
-        positions: List[Dict[str, Any]],
-        sleep_seconds: float = 0.0,
-        workers: int = 1,
-    ) -> Dict[str, Any]:
-        """Fetch and upsert daily quotes only.
-
-        Universe quote coverage should not pay for per-stock basic/financial
-        refreshes. This keeps full `sync_positions()` for portfolio/deep imports
-        and gives `import-universe-quotes` a fast path.
-        """
-        stats = {"success": 0, "failed": 0, "items": []}
-        total = len(positions)
-
-        def _one(position: Dict[str, Any]) -> Dict[str, Any]:
-            code = _clean_code(position.get("code"), position.get("market", "A股"))
-            if not code:
-                return {"code": "", "ok": False, "error": "empty code"}
-            pos = {**position, "code": code, "market": position.get("market", "A股")}
-            quotes = self._safe_fetch("A股行情", self._fetch_a_quotes, pos, [], [])
-            quote_count = self.store.upsert_quotes(quotes)
-            if sleep_seconds > 0:
-                time.sleep(sleep_seconds)
-            return {"code": code, "ok": bool(quotes), "quotes": quote_count}
-
-        if workers <= 1:
-            for i, position in enumerate(positions):
-                try:
-                    item = _one(position)
-                except Exception as exc:
-                    code = _clean_code(position.get("code"), position.get("market", "A股"))
-                    item = {"code": code, "ok": False, "error": str(exc)}
-                stats["items"].append(item)
-                if item.get("ok"):
-                    stats["success"] += 1
-                else:
-                    stats["failed"] += 1
-                if total >= 50 and (i + 1) % 100 == 0:
-                    print(f"  进度: {i+1}/{total} (成功 {stats['success']}, 失败 {stats['failed']})")
-            return stats
-
-        with ThreadPoolExecutor(max_workers=workers) as executor:
-            future_map = {executor.submit(_one, position): position for position in positions}
-            for i, future in enumerate(as_completed(future_map), start=1):
-                position = future_map[future]
-                try:
-                    item = future.result()
-                except Exception as exc:
-                    code = _clean_code(position.get("code"), position.get("market", "A股"))
-                    item = {"code": code, "ok": False, "error": str(exc)}
-                stats["items"].append(item)
-                if item.get("ok"):
-                    stats["success"] += 1
-                else:
-                    stats["failed"] += 1
-                if total >= 50 and i % 100 == 0:
-                    print(f"  进度: {i}/{total} (成功 {stats['success']}, 失败 {stats['failed']})")
         return stats
 
     def sync_universe_basic(self, market: str = "A股") -> Dict[str, Any]:
@@ -842,30 +788,37 @@ class FactorDataImporter:
 
     def _fetch_a_quotes(self, position: Dict[str, Any]) -> List[Dict[str, Any]]:
         code = _clean_code(position.get("code"), "A股")
-        prefix = "sh" if code.startswith(("5", "6", "9")) else "sz"
+        return self._fetch_tushare_qfq_quotes(code)
 
-        # 优先腾讯K线（稳通，有超时保护），避免 Sina 限流挂死
-        try:
-            docs = self._fetch_quotes_via_tencent(code, prefix)
-            if docs:
-                return docs
-        except Exception:
-            pass
+    def _fetch_tushare_qfq_quotes(self, code: str) -> List[Dict[str, Any]]:
+        import tushare as ts
 
-        # 兜底: AKShare/Sina（带超时保护）
-        symbol = f"{prefix}{code}"
-        end_date = _utc_now().strftime("%Y%m%d")
-        start_date = (_utc_now() - __import__("datetime").timedelta(days=self.quote_limit + 30)).strftime("%Y%m%d")
-        try:
-            df = self.ak.stock_zh_a_daily(symbol=symbol, start_date=start_date, end_date=end_date, adjust="qfq")
-        except Exception:
+        config = _load_yaml(DEFAULT_CONFIG)
+        token = ((config.get("data_sources") or {}).get("tushare") or {}).get("token", "")
+        if not token:
             return []
+
+        ts.set_token(token)
+        pro = ts.pro_api()
+        ts_code = f"{code}.SH" if code.startswith(("5", "6", "9")) else f"{code}.SZ"
+        end_date = _utc_now().strftime("%Y%m%d")
+        start_date = (_utc_now() - timedelta(days=self.quote_limit + 30)).strftime("%Y%m%d")
+        df = ts.pro_bar(
+            ts_code=ts_code,
+            api=pro,
+            start_date=start_date,
+            end_date=end_date,
+            freq="D",
+            adj="qfq",
+        )
         if df is None or df.empty:
             return []
-        df = df.tail(self.quote_limit)
+
         docs = []
         for _, row in df.iterrows():
-            trade_date = str(row.get("date") or "")[:10]
+            trade_date = str(row.get("trade_date") or "")
+            if len(trade_date) == 8:
+                trade_date = f"{trade_date[:4]}-{trade_date[4:6]}-{trade_date[6:]}"
             close = _safe_float(row.get("close"))
             if not trade_date or not close:
                 continue
@@ -879,76 +832,20 @@ class FactorDataImporter:
                 "high": _safe_float(row.get("high")),
                 "low": _safe_float(row.get("low")),
                 "close": close,
-                "volume": _safe_float(row.get("volume")),
-                "amount": _safe_float(row.get("amount")),
-                "turnover_rate": _safe_float(row.get("turnover"), None),
-                "data_source": "akshare_sina_daily",
+                "pre_close": _safe_float(row.get("pre_close"), None),
+                "change": _safe_float(row.get("change"), None),
+                "pct_chg": _safe_float(row.get("pct_chg"), None),
+                "volume": _safe_float(row.get("vol"), 0) * 100,
+                "amount": _safe_float(row.get("amount"), 0) * 1000,
+                "data_source": CANONICAL_QUOTE_SOURCE,
+                "adjust": "qfq",
                 "period": "daily",
             })
         return docs
 
     def _fetch_etf_quotes(self, position: Dict[str, Any]) -> List[Dict[str, Any]]:
         code = _clean_code(position.get("code"), "A股")
-        prefix = "sh" if code.startswith(("5", "6", "9")) else "sz"
-
-        # 腾讯K线（ETF和股票通用，最稳定）
-        try:
-            docs = self._fetch_quotes_via_tencent(code, prefix)
-            if docs:
-                return docs
-        except Exception:
-            pass
-
-        # 兜底: Eastmoney → Sina
-        end_date = _utc_now().strftime("%Y%m%d")
-        start_date = (_utc_now() - __import__("datetime").timedelta(days=self.quote_limit + 30)).strftime("%Y%m%d")
-        try:
-            df = self.ak.fund_etf_hist_em(symbol=code, period="daily",
-                                          start_date=start_date, end_date=end_date, adjust="qfq")
-            if df is not None and not df.empty:
-                return self._parse_etf_quotes(code, df, "akshare_fund_etf_hist_em")
-        except Exception:
-            pass
-        try:
-            df = self.ak.stock_zh_a_daily(symbol=f"{prefix}{code}",
-                                          start_date=start_date, end_date=end_date, adjust="qfq")
-            if df is not None and not df.empty:
-                return self._parse_etf_quotes_sina(code, df)
-        except Exception:
-            pass
-        return []
-
-    @staticmethod
-    def _fetch_quotes_via_tencent(code: str, prefix: str) -> List[Dict[str, Any]]:
-        """腾讯K线接口（ETF和股票通用，已验证稳通）。"""
-        import json as _json
-        import urllib.request as _req
-        url = f"http://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param={prefix}{code},day,,,200,qfq"
-        request = _req.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-        with _req.urlopen(request, timeout=8) as resp:
-            data = _json.loads(resp.read())
-        klines = (data.get("data") or {}).get(f"{prefix}{code}", {}).get("day") or []
-        if not klines:
-            klines = (data.get("data") or {}).get(f"{prefix}{code}", {}).get("qfqday") or []
-        docs = []
-        for k in klines[-200:]:
-            if len(k) < 5:
-                continue
-            trade_date, open_p, close_p, high_p, low_p, volume = k[0], k[1], k[2], k[3], k[4], k[5]
-            close = _safe_float(close_p)
-            if not trade_date or not close:
-                continue
-            docs.append({
-                "code": code, "symbol": code, "market": "A股", "currency": "CNY",
-                "trade_date": str(trade_date)[:10],
-                "open": _safe_float(open_p),
-                "high": _safe_float(high_p),
-                "low": _safe_float(low_p),
-                "close": close,
-                "volume": _safe_float(volume),
-                "data_source": "tencent_kline", "period": "daily",
-            })
-        return docs
+        return self._fetch_tushare_qfq_quotes(code)
 
     @staticmethod
     def _parse_etf_quotes(code: str, df: Any, source: str) -> List[Dict[str, Any]]:

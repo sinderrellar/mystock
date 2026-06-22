@@ -187,100 +187,150 @@ def import_stocks(codes: List[str], store: MongoFactorDataStore,
 # 全市场日线预导入 — 供 buy_plan 等策略直接查询
 # ============================================================
 
-def import_universe_quotes(
+def _normalize_tushare_date(value: Optional[str]) -> Optional[str]:
+    if not value:
+        return None
+    text = str(value).strip()
+    if len(text) == 10:
+        return text.replace("-", "")
+    return text
+
+
+def _next_date(date_text: str) -> str:
+    dt = datetime.strptime(date_text, "%Y-%m-%d")
+    return (dt + timedelta(days=1)).strftime("%Y%m%d")
+
+
+def _ts_code(code: str) -> str:
+    return f"{code}.SH" if code.startswith(("5", "6", "9")) else f"{code}.SZ"
+
+
+def import_quotes(
     store: MongoFactorDataStore,
     limit: int = 5000,
-    workers: int = 8,
-    quote_sleep: float = 0.0,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    sleep_seconds: float = 0.12,
 ) -> Dict[str, Any]:
-    """预导入大盘股的日线数据（市值排序前 N 只），供 buy_plan 直接查询。
+    """导入 canonical Tushare 前复权日线。
 
-    从 MongoDB basic_info 取已有股票的代码列表，按成交额排序取前 N 只，
-    批量补齐日线。跳过已有最近 2 天内日线的股票。
+    使用 ts.pro_bar(adj="qfq")，保持与旧 TradingAgents 历史全量源一致。
     """
-    from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+    import tushare as ts
 
-    print(f"获取已入库的 A 股列表...")
-
-    # 已有近期日线的股票跳过（增量逻辑，只补缺的）。
-    # A股/港股在未收盘、休市或数据源延迟时不一定有自然日今天的数据；
-    # 这里保留 2 天窗口，避免 2026-06-19 这类无当日日线场景反复重跑全市场。
-    cutoff = (_dt.now(_tz(_td(hours=8))) - _td(days=2)).strftime("%Y-%m-%d")
-    recent_codes = set(
-        d["_id"] for d in store.db[store.collections["daily_quotes"]].aggregate([
-            {"$match": {"trade_date": {"$gte": cutoff}, "period": "daily"}},
-            {"$group": {"_id": "$code"}},
-        ])
-    )
-    print(f"  已有近期日线: {len(recent_codes)} 只")
+    pro = _get_tushare_pro()
+    if pro is None:
+        return {"ok": False, "error": "Tushare token 未配置或 tushare 不可用"}
 
     pool = _get_pool_filters()
-    base_query = {
+    query = {
         "display_market": "A股",
         "market": {"$in": pool.get("markets", ["主板", "创业板", "科创板"])},
         "latest_amount": {"$gte": pool.get("min_amount", 50000000) / 10000},
         "total_mv": {"$gte": pool.get("min_market_cap", 5000000000)},
     }
-    coverage_pool_count = store.db[store.collections["basic_info"]].count_documents(base_query)
-
-    # 行情覆盖层只按交易活跃度/市值过滤，不用 PE；PE 是下游因子和策略层的筛选条件。
-    query = {
-        **base_query,
-        "code": {"$nin": list(recent_codes)},
-    }
-    all_stocks = list(store.db[store.collections["basic_info"]].find(
-        query, {"code": 1, "name": 1, "latest_amount": 1, "_id": 0},
+    stocks = list(store.db[store.collections["basic_info"]].find(
+        query,
+        {"code": 1, "name": 1, "list_date": 1, "_id": 0},
     ).sort("latest_amount", -1).limit(limit))
 
-    todo = [{"code": s["code"], "name": s.get("name", s["code"]),
-             "market": "A股", "asset_type": "stock"} for s in all_stocks]
-    skipped = len(recent_codes)
+    quotes_coll = store.db[store.collections["daily_quotes"]]
+    imported = 0
+    failed = 0
+    skipped = 0
+    latest_date = None
+    end = _normalize_tushare_date(end_date) or datetime.now().strftime("%Y%m%d")
 
-    print(f"  行情覆盖池: {coverage_pool_count} 只；需导入: {len(all_stocks)} 只（已有 {skipped} 只跳过）")
+    print(f"导入 Tushare 前复权日线: stocks={len(stocks)}, end={end}")
+    for i, stock in enumerate(stocks, start=1):
+        code = str(stock.get("code") or "").zfill(6)
+        if not code:
+            skipped += 1
+            continue
 
-    worker_count = min(max(1, workers), 32)
-    sleep_seconds = max(0.0, quote_sleep)
-    importer = FactorDataImporter(store, quote_limit=180)
-    stats = {"success": 0, "failed": 0, "items": []}
-    if todo:
-        print(f"  quote-only 快速导入: workers={worker_count}, quote_sleep={sleep_seconds}s")
-        stats = importer.sync_quotes_only(
-            todo,
-            sleep_seconds=sleep_seconds,
-            workers=worker_count,
-        )
-    else:
-        print("  A股行情覆盖池已有近期日线，跳过 A股 导入")
-    ok = stats.get("success", 0)
-    print(f"  完成: {ok}/{len(todo)}")
+        start = _normalize_tushare_date(start_date)
+        if not start:
+            latest = quotes_coll.find_one(
+                {"code": code, "period": "daily", "data_source": "tushare"},
+                {"trade_date": 1, "_id": 0},
+                sort=[("trade_date", -1)],
+            )
+            if latest and latest.get("trade_date"):
+                start = _next_date(str(latest["trade_date"]))
+            else:
+                list_date = str(stock.get("list_date") or "").replace("-", "")
+                start = list_date if len(list_date) == 8 else "19900101"
 
-    # 港股持仓日线：补最近 quote_limit 条，而不是只补自然日 today。
-    # 港股源站可能只更新到上一交易日；若用 today 过滤，会导致旧数据长期补不上。
-    hk_stocks = _load_portfolio_hk_stocks()
-    if hk_stocks:
-        hk_imported = 0
-        for s in hk_stocks:
-            code = s["code"]
-            if code in recent_codes:
+        if start > end:
+            skipped += 1
+            continue
+
+        try:
+            df = ts.pro_bar(
+                ts_code=_ts_code(code),
+                api=pro,
+                start_date=start,
+                end_date=end,
+                freq="D",
+                adj="qfq",
+            )
+            if df is None or df.empty:
+                skipped += 1
                 continue
-            try:
-                quotes = importer._fetch_hk_quotes({**s, "market": "港股"})
-                cnt = store.upsert_quotes(quotes)
-                hk_imported += cnt
-                latest = max((q.get("trade_date") for q in quotes), default="?")
-                print(f"  {code} 港股日线: {cnt} 条，最新 {latest}")
-            except Exception as e:
-                print(f"  {code} 港股日线失败: {e}")
-        if hk_imported > 0:
-            ok += hk_imported
 
-    return {"ok": True, "imported": ok, "skipped": skipped,
-            "failed": stats.get("failed", 0),
-            "coverage_pool_count": coverage_pool_count,
-            "quote_only": True,
-            "workers": worker_count,
-            "quote_sleep": sleep_seconds}
+            docs = []
+            for _, row in df.iterrows():
+                trade_date = str(row.get("trade_date") or "")
+                if len(trade_date) == 8:
+                    trade_date = f"{trade_date[:4]}-{trade_date[4:6]}-{trade_date[6:]}"
+                close = _safe_float(row.get("close"))
+                if not trade_date or not close:
+                    continue
+                docs.append({
+                    "code": code,
+                    "symbol": code,
+                    "market": "A股",
+                    "currency": "CNY",
+                    "trade_date": trade_date,
+                    "open": _safe_float(row.get("open")),
+                    "high": _safe_float(row.get("high")),
+                    "low": _safe_float(row.get("low")),
+                    "close": close,
+                    "pre_close": _safe_float(row.get("pre_close"), None),
+                    "change": _safe_float(row.get("change"), None),
+                    "pct_chg": _safe_float(row.get("pct_chg"), None),
+                    "volume": _safe_float(row.get("vol"), 0) * 100,
+                    "amount": _safe_float(row.get("amount"), 0) * 1000,
+                    "data_source": "tushare",
+                    "period": "daily",
+                    "adjust": "qfq",
+                })
+            if not docs:
+                skipped += 1
+                continue
+            count = store.upsert_quotes(docs)
+            imported += count
+            doc_latest = max(d["trade_date"] for d in docs)
+            latest_date = max(latest_date or doc_latest, doc_latest)
+        except Exception as exc:
+            failed += 1
+            print(f"  {code} Tushare 日线失败: {exc}")
 
+        if i % 100 == 0:
+            print(f"  进度: {i}/{len(stocks)} imported={imported}, failed={failed}, skipped={skipped}")
+        if sleep_seconds > 0:
+            time.sleep(sleep_seconds)
+
+    return {
+        "ok": failed == 0,
+        "source": "tushare",
+        "adjust": "qfq",
+        "stocks": len(stocks),
+        "imported": imported,
+        "failed": failed,
+        "skipped": skipped,
+        "latest": latest_date,
+    }
 
 def _load_portfolio_hk_stocks() -> List[Dict[str, Any]]:
     """从 portfolio.yaml 提取港股代码。"""
@@ -1492,7 +1542,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="统一数据导入管道")
     parser.add_argument("command", choices=[
         "import-portfolio", "import-stocks", "import-universe-light",
-        "import-universe-quotes", "import-hk-shortsell",
+        "import-quotes", "import-hk-shortsell",
         "import-hk-southbound", "import-dividend-yield", "repair-pe",
         "import-industry-moneyflow", "import-market-moneyflow", "import-macro-news",
         "import-top-list", "import-stock-moneyflow", "import-stock-forecast",
@@ -1505,10 +1555,10 @@ def main() -> None:
     parser.add_argument("--market", default="A股")
     parser.add_argument("--quote-limit", type=int, default=None)
     parser.add_argument("--sleep", type=float, default=0.6)
-    parser.add_argument("--workers", type=int, default=8,
-                        help="import-universe-quotes quote fetch concurrency")
-    parser.add_argument("--quote-sleep", type=float, default=0.0,
-                        help="import-universe-quotes sleep seconds after each quote fetch")
+    parser.add_argument("--start-date", default=None,
+                        help="import-quotes 起始日期 YYYY-MM-DD 或 YYYYMMDD")
+    parser.add_argument("--end-date", default=None,
+                        help="import-quotes 结束日期 YYYY-MM-DD 或 YYYYMMDD")
     args = parser.parse_args()
 
     if args.command == "config-check":
@@ -1539,14 +1589,15 @@ def main() -> None:
     elif args.command == "import-universe-light":
         import_universe_light(store)
 
-    elif args.command == "import-universe-quotes":
-        import_universe_quotes(
+    elif args.command == "import-quotes":
+        result = import_quotes(
             store,
             limit=args.quote_limit or 5000,
-            workers=args.workers,
-            quote_sleep=args.quote_sleep,
+            start_date=args.start_date,
+            end_date=args.end_date,
+            sleep_seconds=args.sleep,
         )
-
+        print(result)
 
     elif args.command == "import-hk-shortsell":
         import_hk_shortsell(store)
@@ -1610,7 +1661,7 @@ def main() -> None:
         else:
             print("\n✅ 所有数据正常")
         if not result["ok"]:
-            print("\n建议: 运行 python3 scripts/data_import_pipeline.py import-universe-quotes --quote-limit 5000; python3 scripts/precompute_history.py --date today")
+            print("\n建议: 运行 python3 scripts/data_import_pipeline.py import-quotes --quote-limit 5000; python3 scripts/precompute_history.py --date today")
 
 
 if __name__ == "__main__":

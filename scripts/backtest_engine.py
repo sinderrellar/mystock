@@ -98,9 +98,11 @@ class BacktestEngine:
                 continue
 
             # 先查次交易日数据，用 next-day open 作为实际买入价
+            quote_query = {"code": code, "period": "daily",
+                           "trade_date": {"$gt": signal_date},
+                           "data_source": self.mongo.quote_source}
             later = list(self.mongo.db[self.mongo.collections["daily_quotes"]].find(
-                {"code": code, "period": "daily",
-                 "trade_date": {"$gt": signal_date}},
+                quote_query,
                 sort=[("trade_date", 1)],
             ).limit(self.max_hold_days))
 
