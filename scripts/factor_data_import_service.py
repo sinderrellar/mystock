@@ -827,16 +827,20 @@ class FactorDataImporter:
                 adj="qfq",
             )
         noise = captured.getvalue().strip()
+        needs_fallback = (
+            (df is None or df.empty) and noise and "trade_date" in noise
+        ) or (
+            df is not None and not df.empty and "trade_date" not in df.columns
+        ) or (
+            noise and "trade_date" in noise
+        )
+        if needs_fallback:
+            reason = noise.splitlines()[0] if noise else "missing trade_date"
+            df = self._fetch_tushare_daily_qfq_dataframe(pro, ts_code, start_date, end_date)
+            if df is None or df.empty:
+                raise RuntimeError(f"pro_bar failed ({reason}); daily+adj_factor fallback empty")
         if df is None or df.empty:
-            if noise and "trade_date" in noise:
-                raise RuntimeError(f"pro_bar empty result with warning: {noise.splitlines()[0]}")
             return []
-        if "trade_date" not in df.columns:
-            columns = ",".join(str(c) for c in df.columns)
-            detail = noise.splitlines()[0] if noise else "missing trade_date"
-            raise RuntimeError(f"pro_bar invalid result: {detail}; columns=[{columns}]")
-        if noise and "trade_date" in noise:
-            raise RuntimeError(f"pro_bar warning: {noise.splitlines()[0]}")
 
         docs = []
         for _, row in df.iterrows():
@@ -866,6 +870,30 @@ class FactorDataImporter:
                 "period": "daily",
             })
         return docs
+
+    @staticmethod
+    def _fetch_tushare_daily_qfq_dataframe(pro, ts_code: str, start_date: str, end_date: str):
+        """Build qfq bars from Tushare daily + adj_factor when pro_bar is malformed."""
+        daily = pro.daily(ts_code=ts_code, start_date=start_date, end_date=end_date)
+        if daily is None or daily.empty or "trade_date" not in daily.columns:
+            return daily
+        adj = pro.adj_factor(ts_code=ts_code, start_date=start_date, end_date=end_date)
+        if adj is None or adj.empty or "trade_date" not in adj.columns or "adj_factor" not in adj.columns:
+            return daily
+
+        merged = daily.merge(adj[["trade_date", "adj_factor"]], on="trade_date", how="left")
+        if merged["adj_factor"].dropna().empty:
+            return daily
+        latest_factor = float(
+            merged.dropna(subset=["adj_factor"]).sort_values("trade_date", ascending=False)["adj_factor"].iloc[0]
+        )
+        if latest_factor <= 0:
+            return daily
+        ratio = merged["adj_factor"] / latest_factor
+        for col in ("open", "high", "low", "close", "pre_close"):
+            if col in merged.columns:
+                merged[col] = merged[col] * ratio
+        return merged
 
     def _fetch_etf_quotes(self, position: Dict[str, Any]) -> List[Dict[str, Any]]:
         code = _clean_code(position.get("code"), "A股")

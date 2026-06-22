@@ -222,17 +222,46 @@ def _fetch_tushare_qfq_bar(ts_module, pro, ts_code: str, start: str, end: str):
         )
 
     noise = captured.getvalue().strip()
+    needs_fallback = (
+        (df is None or df.empty) and noise and "trade_date" in noise
+    ) or (
+        df is not None and not df.empty and "trade_date" not in df.columns
+    ) or (
+        noise and "trade_date" in noise
+    )
+    if needs_fallback:
+        reason = noise.splitlines()[0] if noise else "missing trade_date"
+        fallback = _fetch_tushare_daily_qfq_bar(pro, ts_code, start, end)
+        if fallback is None or fallback.empty:
+            raise RuntimeError(f"pro_bar failed ({reason}); daily+adj_factor fallback empty")
+        return fallback, reason
     if df is None or df.empty:
-        if noise and "trade_date" in noise:
-            raise RuntimeError(f"pro_bar empty result with warning: {noise.splitlines()[0]}")
-        return df, noise
-    if "trade_date" not in df.columns:
-        columns = ",".join(str(c) for c in df.columns)
-        detail = noise.splitlines()[0] if noise else "missing trade_date"
-        raise RuntimeError(f"pro_bar invalid result: {detail}; columns=[{columns}]")
-    if noise and "trade_date" in noise:
-        raise RuntimeError(f"pro_bar warning: {noise.splitlines()[0]}")
-    return df, noise
+        return df, None
+    return df, None
+
+
+def _fetch_tushare_daily_qfq_bar(pro, ts_code: str, start: str, end: str):
+    """Build qfq bars from Tushare daily + adj_factor when pro_bar is malformed."""
+    daily = pro.daily(ts_code=ts_code, start_date=start, end_date=end)
+    if daily is None or daily.empty or "trade_date" not in daily.columns:
+        return daily
+    adj = pro.adj_factor(ts_code=ts_code, start_date=start, end_date=end)
+    if adj is None or adj.empty or "trade_date" not in adj.columns or "adj_factor" not in adj.columns:
+        return daily
+
+    merged = daily.merge(adj[["trade_date", "adj_factor"]], on="trade_date", how="left")
+    if merged["adj_factor"].dropna().empty:
+        return daily
+    latest_factor = float(
+        merged.dropna(subset=["adj_factor"]).sort_values("trade_date", ascending=False)["adj_factor"].iloc[0]
+    )
+    if latest_factor <= 0:
+        return daily
+    ratio = merged["adj_factor"] / latest_factor
+    for col in ("open", "high", "low", "close", "pre_close"):
+        if col in merged.columns:
+            merged[col] = merged[col] * ratio
+    return merged
 
 
 def import_quotes(
@@ -268,6 +297,7 @@ def import_quotes(
     imported = 0
     failed = 0
     skipped = 0
+    fallback_used = 0
     latest_date = None
     end = _normalize_tushare_date(end_date) or datetime.now().strftime("%Y%m%d")
 
@@ -296,7 +326,9 @@ def import_quotes(
             continue
 
         try:
-            df, _ = _fetch_tushare_qfq_bar(ts, pro, _ts_code(code), start, end)
+            df, fallback_reason = _fetch_tushare_qfq_bar(ts, pro, _ts_code(code), start, end)
+            if fallback_reason:
+                fallback_used += 1
             if df is None or df.empty:
                 skipped += 1
                 continue
@@ -340,7 +372,7 @@ def import_quotes(
             print(f"  {code} Tushare 日线失败: {exc}")
 
         if i % 100 == 0:
-            print(f"  进度: {i}/{len(stocks)} imported={imported}, failed={failed}, skipped={skipped}")
+            print(f"  进度: {i}/{len(stocks)} imported={imported}, failed={failed}, skipped={skipped}, fallback={fallback_used}")
         if sleep_seconds > 0:
             time.sleep(sleep_seconds)
 
@@ -352,6 +384,7 @@ def import_quotes(
         "imported": imported,
         "failed": failed,
         "skipped": skipped,
+        "fallback": fallback_used,
         "latest": latest_date,
     }
 
