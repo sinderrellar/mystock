@@ -218,7 +218,7 @@ def main():
     else:
         # 从 daily_quotes 取最近有交易的 A 股
         pipeline = [
-            {"$match": {"period": "daily"}},
+            {"$match": {"period": "daily", "data_source": store.quote_source}},
             {"$sort": {"trade_date": -1}},
             {"$group": {"_id": "$code", "last_date": {"$first": "$trade_date"}}},
             {"$match": {"last_date": {"$gte": "2026-06-01"}}},

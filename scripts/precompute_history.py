@@ -58,7 +58,7 @@ def _resolve_today_trade_date(
     today_cn = datetime.now(_CN_TZ).strftime("%Y-%m-%d")
     coll = store.db[store.collections["daily_quotes"]]
     pipeline = [
-        {"$match": {"period": "daily", "trade_date": {"$lte": today_cn}}},
+        {"$match": {"period": "daily", "data_source": store.quote_source, "trade_date": {"$lte": today_cn}}},
         {"$group": {"_id": "$trade_date", "count": {"$sum": 1}}},
         {"$match": {"count": {"$gte": min_quotes}}},
         {"$sort": {"_id": -1}},
@@ -551,7 +551,7 @@ def main():
         dates = [target_date]
     elif args.start:
         coll = store.db[store.collections["daily_quotes"]]
-        all_dates = sorted(coll.distinct("trade_date"))
+        all_dates = sorted(coll.distinct("trade_date", {"period": "daily", "data_source": store.quote_source}))
         dates = [d for d in all_dates if args.start <= d <= (args.end or "2099-01-01")]
     else:
         parser.print_help()

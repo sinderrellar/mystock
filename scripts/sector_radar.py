@@ -492,7 +492,8 @@ class SectorRadarEngine:
         cutoff = (datetime.now(timezone.utc) - timedelta(days=80)).strftime("%Y-%m-%d")
         vols = defaultdict(list)
         for doc in daily.find(
-            {"code": {"$in": codes}, "trade_date": {"$gte": cutoff}},
+            {"code": {"$in": codes}, "trade_date": {"$gte": cutoff},
+             "period": "daily", "data_source": self.mongo.quote_source},
             {"code": 1, "trade_date": 1, "volume": 1}
         ).sort("trade_date", 1):
             vols[doc["code"]].append((doc["trade_date"], doc.get("volume", 0)))

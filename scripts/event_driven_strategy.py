@@ -916,9 +916,10 @@ class TechnicalValidator:
                 f"{code}.SH" if code.startswith('6') else f"{code}.SZ"
             ]
 
+            quote_source = self._store.quote_source if self._store else "tushare"
             for code_var in code_variants:
                 quotes = list(self.db[self._collections['daily_quotes']].find(
-                    {'code': code_var},
+                    {'code': code_var, 'period': 'daily', 'data_source': quote_source},
                     sort=[('trade_date', -1)],
                     limit=days
                 ))
