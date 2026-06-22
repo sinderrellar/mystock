@@ -839,6 +839,40 @@ class BuyPlanEngine:
         return report
 
 
+def _json_safe(value: Any) -> Any:
+    return json.loads(json.dumps(value, ensure_ascii=False, default=str))
+
+
+def persist_buy_plan_snapshot(
+    mongo: MongoFactorDataStore,
+    report: Dict[str, Any],
+    params: Dict[str, Any],
+) -> Optional[str]:
+    """Persist a compact buy_plan snapshot for forward-test review."""
+    try:
+        coll = mongo.db["buy_plan_snapshots"]
+        coll.create_index([("generated_at", -1)], background=True)
+        coll.create_index([("run_date", -1)], background=True)
+        coll.create_index([("recommendations.code", 1), ("run_date", -1)], background=True)
+
+        generated_at = report.get("generated_at") or _utc_now().isoformat()
+        doc = {
+            "schema_version": 1,
+            "kind": "buy_plan_snapshot",
+            "generated_at": generated_at,
+            "run_date": (params.get("target_date") or generated_at[:10]),
+            "params": _json_safe(params),
+            "pipeline": _json_safe(report.get("pipeline", {})),
+            "market_context": _json_safe(report.get("market_context", {})),
+            "recommendations": _json_safe(report.get("recommendations", [])),
+            "created_at": _utc_now(),
+        }
+        result = coll.insert_one(doc)
+        return str(result.inserted_id)
+    except Exception as exc:
+        print(f"⚠️ buy_plan 留痕失败: {exc}")
+        return None
+
 
 def format_buy_plan(report: Dict[str, Any]) -> str:
 
@@ -916,6 +950,11 @@ def format_buy_plan(report: Dict[str, Any]) -> str:
 
         turnover = r.get("turnover_rate")
 
+    trace = report.get("trace") or {}
+    if trace.get("id"):
+        lines.append("")
+        lines.append(f"留痕: {trace.get('collection', 'buy_plan_snapshots')}/{trace['id']}")
+
     lines.extend(["", "=" * 90])
 
     return "\n".join(lines)
@@ -952,6 +991,10 @@ def main():
 
     parser.add_argument("--json", action="store_true")
 
+    parser.add_argument("--no-trace", action="store_true",
+
+                       help="不写入 buy_plan_snapshots 留痕集合")
+
     args = parser.parse_args()
 
 
@@ -969,6 +1012,26 @@ def main():
                         enrich_limit=args.enrich, industries=industries,
 
                         target_date=args.date)
+
+    if not args.no_trace and not report.get("error"):
+
+        snapshot_id = persist_buy_plan_snapshot(engine.mongo, report, {
+
+            "top_n": args.top,
+
+            "initial_limit": args.limit,
+
+            "enrich_limit": args.enrich,
+
+            "target_date": args.date,
+
+            "industries": industries,
+
+        })
+
+        if snapshot_id:
+
+            report["trace"] = {"collection": "buy_plan_snapshots", "id": snapshot_id}
 
 
 
