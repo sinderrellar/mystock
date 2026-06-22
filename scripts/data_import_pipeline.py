@@ -205,6 +205,36 @@ def _ts_code(code: str) -> str:
     return f"{code}.SH" if code.startswith(("5", "6", "9")) else f"{code}.SZ"
 
 
+def _fetch_tushare_qfq_bar(ts_module, pro, ts_code: str, start: str, end: str):
+    """Call ts.pro_bar while capturing its internal stdout/stderr noise."""
+    import contextlib
+    import io
+
+    captured = io.StringIO()
+    with contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):
+        df = ts_module.pro_bar(
+            ts_code=ts_code,
+            api=pro,
+            start_date=start,
+            end_date=end,
+            freq="D",
+            adj="qfq",
+        )
+
+    noise = captured.getvalue().strip()
+    if df is None or df.empty:
+        if noise and "trade_date" in noise:
+            raise RuntimeError(f"pro_bar empty result with warning: {noise.splitlines()[0]}")
+        return df, noise
+    if "trade_date" not in df.columns:
+        columns = ",".join(str(c) for c in df.columns)
+        detail = noise.splitlines()[0] if noise else "missing trade_date"
+        raise RuntimeError(f"pro_bar invalid result: {detail}; columns=[{columns}]")
+    if noise and "trade_date" in noise:
+        raise RuntimeError(f"pro_bar warning: {noise.splitlines()[0]}")
+    return df, noise
+
+
 def import_quotes(
     store: MongoFactorDataStore,
     limit: int = 5000,
@@ -266,14 +296,7 @@ def import_quotes(
             continue
 
         try:
-            df = ts.pro_bar(
-                ts_code=_ts_code(code),
-                api=pro,
-                start_date=start,
-                end_date=end,
-                freq="D",
-                adj="qfq",
-            )
+            df, _ = _fetch_tushare_qfq_bar(ts, pro, _ts_code(code), start, end)
             if df is None or df.empty:
                 skipped += 1
                 continue

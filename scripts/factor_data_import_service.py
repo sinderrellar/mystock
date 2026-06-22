@@ -802,6 +802,8 @@ class FactorDataImporter:
         return self._fetch_tushare_qfq_quotes(code)
 
     def _fetch_tushare_qfq_quotes(self, code: str) -> List[Dict[str, Any]]:
+        import contextlib
+        import io
         import tushare as ts
 
         config = _load_yaml(DEFAULT_CONFIG)
@@ -814,16 +816,27 @@ class FactorDataImporter:
         ts_code = f"{code}.SH" if code.startswith(("5", "6", "9")) else f"{code}.SZ"
         end_date = _utc_now().strftime("%Y%m%d")
         start_date = (_utc_now() - timedelta(days=self.quote_limit + 30)).strftime("%Y%m%d")
-        df = ts.pro_bar(
-            ts_code=ts_code,
-            api=pro,
-            start_date=start_date,
-            end_date=end_date,
-            freq="D",
-            adj="qfq",
-        )
+        captured = io.StringIO()
+        with contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):
+            df = ts.pro_bar(
+                ts_code=ts_code,
+                api=pro,
+                start_date=start_date,
+                end_date=end_date,
+                freq="D",
+                adj="qfq",
+            )
+        noise = captured.getvalue().strip()
         if df is None or df.empty:
+            if noise and "trade_date" in noise:
+                raise RuntimeError(f"pro_bar empty result with warning: {noise.splitlines()[0]}")
             return []
+        if "trade_date" not in df.columns:
+            columns = ",".join(str(c) for c in df.columns)
+            detail = noise.splitlines()[0] if noise else "missing trade_date"
+            raise RuntimeError(f"pro_bar invalid result: {detail}; columns=[{columns}]")
+        if noise and "trade_date" in noise:
+            raise RuntimeError(f"pro_bar warning: {noise.splitlines()[0]}")
 
         docs = []
         for _, row in df.iterrows():
