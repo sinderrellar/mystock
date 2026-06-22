@@ -300,17 +300,27 @@ class MongoFactorDataStore:
     def get_basic(self, code: str) -> Optional[Dict[str, Any]]:
         return self.db[self.collections["basic_info"]].find_one({"code": code})
 
-    def get_latest_quote(self, code: str) -> Optional[Dict[str, Any]]:
+    def _quote_source_for_code(self, code: str, market: Optional[str] = None) -> str:
+        if market == "港股" or len(str(code or "").strip()) == 5:
+            return "akshare_stock_hk_daily"
+        return CANONICAL_QUOTE_SOURCE
+
+    def get_latest_quote(self, code: str, market: Optional[str] = None) -> Optional[Dict[str, Any]]:
         return self.db[self.collections["daily_quotes"]].find_one(
-            {"code": code, "period": "daily", "data_source": CANONICAL_QUOTE_SOURCE},
+            {
+                "code": code,
+                "period": "daily",
+                "data_source": self._quote_source_for_code(code, market),
+            },
             sort=[("trade_date", -1)],
         )
 
-    def count_recent_quotes(self, code: str, limit: int = 180) -> int:
+    def count_recent_quotes(self, code: str, limit: int = 180,
+                            market: Optional[str] = None) -> int:
         return self.db[self.collections["daily_quotes"]].count_documents({
             "code": code,
             "period": "daily",
-            "data_source": CANONICAL_QUOTE_SOURCE,
+            "data_source": self._quote_source_for_code(code, market),
         }, limit=limit)
 
     def get_latest_financial(self, code: str) -> Optional[Dict[str, Any]]:
@@ -351,13 +361,14 @@ class MongoFactorDataStore:
             return []
 
     def get_recent_quotes(self, code: str, limit: int = 60,
+                          market: Optional[str] = None,
                           as_of_date: Optional[str] = None) -> List[Dict[str, Any]]:
         """获取近期日线行情（倒序，最新在前）。as_of_date 限制日期上限。"""
         try:
             query: Dict[str, Any] = {
                 "code": code,
                 "period": "daily",
-                "data_source": CANONICAL_QUOTE_SOURCE,
+                "data_source": self._quote_source_for_code(code, market),
             }
             if as_of_date:
                 query["trade_date"] = {"$lte": as_of_date}

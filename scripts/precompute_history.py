@@ -95,7 +95,7 @@ def _compute_date(store: MongoFactorDataStore, target_date: str,
 
     # ── 1. 当日有成交的 A 股 ──
     price_docs = list(daily.find(
-        {"trade_date": target_date, "period": "daily"},
+        {"trade_date": target_date, "period": "daily", "data_source": store.quote_source},
         {"code": 1, "close": 1, "volume": 1, "amount": 1, "_id": 0},
     ))
     if len(price_docs) < 50:

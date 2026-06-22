@@ -1221,7 +1221,10 @@ def data_check(store: MongoFactorDataStore) -> Dict[str, Any]:
     # 1. A股日线
     qc = store.db[store.collections["daily_quotes"]]
     a_dates = Counter()
-    for d in qc.find({"period": "daily"}, {"trade_date": 1}).sort("trade_date", -1).limit(20000):
+    for d in qc.find(
+        {"period": "daily", "data_source": store.quote_source},
+        {"trade_date": 1},
+    ).sort("trade_date", -1).limit(20000):
         a_dates[d["trade_date"]] += 1
     a_latest = max(a_dates.keys()) if a_dates else "无"
     a_age = (_utc_now() - datetime.strptime(str(a_latest), "%Y-%m-%d").replace(tzinfo=timezone.utc)).days
@@ -1236,7 +1239,7 @@ def data_check(store: MongoFactorDataStore) -> Dict[str, Any]:
     # 2. 港股日线（持仓）
     hk_codes = [p["code"] for p in _load_portfolio_hk_stocks()]
     for code in hk_codes:
-        quotes = store.get_recent_quotes(code, 3)
+        quotes = store.get_recent_quotes(code, 3, market="港股")
         if quotes:
             latest = quotes[0].get("trade_date", "?")
             age = (_utc_now() - datetime.strptime(str(latest), "%Y-%m-%d").replace(tzinfo=timezone.utc)).days
@@ -1661,7 +1664,11 @@ def main() -> None:
         else:
             print("\n✅ 所有数据正常")
         if not result["ok"]:
-            print("\n建议: 运行 python3 scripts/data_import_pipeline.py import-quotes --quote-limit 5000; python3 scripts/precompute_history.py --date today")
+            print(
+                "\n建议: A股日线运行 python3 scripts/data_import_pipeline.py import-quotes --quote-limit 5000；"
+                "港股持仓日线运行 python3 scripts/data_import_pipeline.py import-portfolio；"
+                "随后运行 python3 scripts/precompute_history.py --date today"
+            )
 
 
 if __name__ == "__main__":
