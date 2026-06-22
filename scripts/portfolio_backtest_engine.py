@@ -100,7 +100,7 @@ class PortfolioBacktestEngine:
     def _load_trading_days(self) -> List[str]:
         """加载 trading days 列表（从 stock_factors + daily_quotes 交集）。"""
         factor_dates = set(self.mongo.db["stock_factors"].distinct("trade_date"))
-        quote_query: Dict[str, Any] = {"data_source": self.mongo.quote_source}
+        quote_query: Dict[str, Any] = {"data_source": self.mongo.quote_source, "period": "daily"}
         quote_dates = set(self.mongo.db[self.mongo.collections["daily_quotes"]].distinct("trade_date", quote_query))
         all_dates = sorted(factor_dates & quote_dates)
         return [d for d in all_dates if self.start_date <= d <= self.end_date]
