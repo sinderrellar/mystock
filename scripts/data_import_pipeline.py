@@ -23,8 +23,9 @@ import argparse
 import os
 import sys
 import time
+from collections import deque
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Deque, Dict, List, Optional
 
 import yaml
 from pymongo import ASCENDING
@@ -45,6 +46,28 @@ from factor_data_import_service import (
 
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+class SlidingWindowRateLimiter:
+    """Simple sliding-window limiter for serial Tushare API calls."""
+
+    def __init__(self, max_calls: int, window_seconds: float = 60.0) -> None:
+        self.max_calls = max(1, int(max_calls))
+        self.window_seconds = window_seconds
+        self._calls: Deque[float] = deque()
+
+    def acquire(self) -> None:
+        now = time.monotonic()
+        while self._calls and now - self._calls[0] >= self.window_seconds:
+            self._calls.popleft()
+        if len(self._calls) >= self.max_calls:
+            sleep_for = self.window_seconds - (now - self._calls[0])
+            if sleep_for > 0:
+                time.sleep(sleep_for)
+            now = time.monotonic()
+            while self._calls and now - self._calls[0] >= self.window_seconds:
+                self._calls.popleft()
+        self._calls.append(time.monotonic())
 
 
 def _load_portfolio_positions(portfolio_path: str, include_watchlist: bool = True) -> List[Dict[str, Any]]:
@@ -264,12 +287,94 @@ def _fetch_tushare_daily_qfq_bar(pro, ts_code: str, start: str, end: str):
     return merged
 
 
+def _quote_pool_query(pool: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "display_market": "A股",
+        "market": {"$in": pool.get("markets", ["主板", "创业板", "科创板"])},
+        "latest_amount": {"$gte": pool.get("min_amount", 50000000) / 10000},
+        "total_mv": {"$gte": pool.get("min_market_cap", 5000000000)},
+    }
+
+
+def _normalize_trade_date(value: Optional[str]) -> Optional[str]:
+    if not value:
+        return None
+    text = str(value).strip()
+    if len(text) == 8 and text.isdigit():
+        return f"{text[:4]}-{text[4:6]}-{text[6:]}"
+    if len(text) == 10 and text[4] == "-" and text[7] == "-":
+        return text
+    return None
+
+
+def _find_quote_gaps(
+    store: MongoFactorDataStore,
+    stocks: List[Dict[str, Any]],
+    start_date: str,
+    end_date: str,
+) -> Dict[str, Dict[str, Any]]:
+    """Find per-code quote gaps against the observed Tushare trading days."""
+    quotes_coll = store.db[store.collections["daily_quotes"]]
+    date_rows = quotes_coll.aggregate([
+        {"$match": {
+            "data_source": "tushare",
+            "period": "daily",
+            "trade_date": {"$gte": start_date, "$lte": end_date},
+        }},
+        {"$group": {"_id": "$trade_date"}},
+        {"$sort": {"_id": 1}},
+    ], allowDiskUse=True)
+    expected_dates = [row["_id"] for row in date_rows]
+    if not expected_dates:
+        return {}
+
+    code_to_stock = {
+        str(stock.get("code") or "").zfill(6): stock
+        for stock in stocks
+        if stock.get("code")
+    }
+    codes = list(code_to_stock)
+    docs = quotes_coll.find(
+        {
+            "code": {"$in": codes},
+            "data_source": "tushare",
+            "period": "daily",
+            "trade_date": {"$gte": start_date, "$lte": end_date},
+        },
+        {"code": 1, "trade_date": 1, "_id": 0},
+    )
+
+    dates_by_code: Dict[str, set] = {code: set() for code in codes}
+    for doc in docs:
+        code = str(doc.get("code") or "").zfill(6)
+        trade_date = _normalize_trade_date(doc.get("trade_date"))
+        if code and trade_date:
+            dates_by_code.setdefault(code, set()).add(trade_date)
+
+    gap_plan: Dict[str, Dict[str, Any]] = {}
+    for code, stock in code_to_stock.items():
+        seen_dates = dates_by_code.get(code, set())
+        missing_dates = [day for day in expected_dates if day not in seen_dates]
+        if not missing_dates:
+            continue
+        gap_plan[code] = {
+            "code": code,
+            "name": stock.get("name"),
+            "list_date": stock.get("list_date"),
+            "start_date": missing_dates[0].replace("-", ""),
+            "missing_dates": missing_dates,
+        }
+    return gap_plan
+
+
 def import_quotes(
     store: MongoFactorDataStore,
     limit: int = 5000,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
     sleep_seconds: float = 0.12,
+    rate_limit_per_minute: int = 160,
+    repair_missing: bool = False,
 ) -> Dict[str, Any]:
     """导入 canonical Tushare 前复权日线。
 
@@ -282,12 +387,7 @@ def import_quotes(
         return {"ok": False, "error": "Tushare token 未配置或 tushare 不可用"}
 
     pool = _get_pool_filters()
-    query = {
-        "display_market": "A股",
-        "market": {"$in": pool.get("markets", ["主板", "创业板", "科创板"])},
-        "latest_amount": {"$gte": pool.get("min_amount", 50000000) / 10000},
-        "total_mv": {"$gte": pool.get("min_market_cap", 5000000000)},
-    }
+    query = _quote_pool_query(pool)
     stocks = list(store.db[store.collections["basic_info"]].find(
         query,
         {"code": 1, "name": 1, "list_date": 1, "_id": 0},
@@ -299,16 +399,37 @@ def import_quotes(
     skipped = 0
     fallback_used = 0
     latest_date = None
+    scanned_gap_codes = 0
     end = _normalize_tushare_date(end_date) or datetime.now().strftime("%Y%m%d")
+    normalized_end = _normalize_trade_date(end) or end
+    limiter = SlidingWindowRateLimiter(rate_limit_per_minute)
 
-    print(f"导入 Tushare 前复权日线: stocks={len(stocks)}, end={end}")
+    gap_plan: Dict[str, Dict[str, Any]] = {}
+    if repair_missing:
+        normalized_start = _normalize_trade_date(start_date) or "1990-01-01"
+        gap_plan = _find_quote_gaps(store, stocks, normalized_start, normalized_end)
+        scanned_gap_codes = len(gap_plan)
+        stocks = [stock for stock in stocks if str(stock.get("code") or "").zfill(6) in gap_plan]
+        print(
+            f"扫描缺口完成: range={normalized_start}..{normalized_end}, "
+            f"gap_codes={scanned_gap_codes}, import_targets={len(stocks)}"
+        )
+
+    print(
+        f"导入 Tushare 前复权日线: stocks={len(stocks)}, end={end}, "
+        f"rate_limit={rate_limit_per_minute}/min, repair_missing={repair_missing}"
+    )
     for i, stock in enumerate(stocks, start=1):
         code = str(stock.get("code") or "").zfill(6)
         if not code:
             skipped += 1
             continue
 
-        start = _normalize_tushare_date(start_date)
+        start = None
+        if repair_missing and code in gap_plan:
+            start = gap_plan[code]["start_date"]
+        else:
+            start = _normalize_tushare_date(start_date)
         if not start:
             latest = quotes_coll.find_one(
                 {"code": code, "period": "daily", "data_source": "tushare"},
@@ -326,6 +447,7 @@ def import_quotes(
             continue
 
         try:
+            limiter.acquire()
             df, fallback_reason = _fetch_tushare_qfq_bar(ts, pro, _ts_code(code), start, end)
             if fallback_reason:
                 fallback_used += 1
@@ -386,6 +508,9 @@ def import_quotes(
         "skipped": skipped,
         "fallback": fallback_used,
         "latest": latest_date,
+        "repair_missing": repair_missing,
+        "gap_codes": scanned_gap_codes,
+        "rate_limit_per_minute": rate_limit_per_minute,
     }
 
 def _load_portfolio_hk_stocks() -> List[Dict[str, Any]]:
@@ -1618,6 +1743,10 @@ def main() -> None:
                         help="import-quotes 起始日期 YYYY-MM-DD 或 YYYYMMDD")
     parser.add_argument("--end-date", default=None,
                         help="import-quotes 结束日期 YYYY-MM-DD 或 YYYYMMDD")
+    parser.add_argument("--rate-limit-per-minute", type=int, default=160,
+                        help="import-quotes 每分钟最大 Tushare 调用数，默认 160")
+    parser.add_argument("--repair-missing", action="store_true",
+                        help="import-quotes 先扫描 start/end 区间缺口，再只补缺口股票")
     args = parser.parse_args()
 
     if args.command == "config-check":
@@ -1655,6 +1784,8 @@ def main() -> None:
             start_date=args.start_date,
             end_date=args.end_date,
             sleep_seconds=args.sleep,
+            rate_limit_per_minute=args.rate_limit_per_minute,
+            repair_missing=args.repair_missing,
         )
         print(result)
 

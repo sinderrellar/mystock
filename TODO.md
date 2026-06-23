@@ -1,5 +1,8 @@
 # TODO
 
+## 已完成
+- [x] A股日线 canonical 源统一为 `tushare(qfq)`，远端 `stock_daily_quotes` 仅剩 `tushare`（最新 `2026-06-22`）；非 `tushare` 仅余港股 `akshare_stock_hk_daily`
+
 ## 立即
 - [ ] `precompute --factors-only` 重跑（momentum V2 + turnaround V3）
 - [ ] 72天完整回测验证
