@@ -303,6 +303,12 @@ def _a_share_universe_query() -> Dict[str, Any]:
     }
 
 
+def _quote_scope_query(scope: str, pool: Dict[str, Any]) -> Dict[str, Any]:
+    if scope == "universe":
+        return _a_share_universe_query()
+    return _quote_pool_query(pool)
+
+
 def _normalize_trade_date(value: Optional[str]) -> Optional[str]:
     if not value:
         return None
@@ -518,6 +524,7 @@ def import_quotes(
     sleep_seconds: float = 0.12,
     rate_limit_per_minute: int = 160,
     repair_missing: bool = False,
+    scope: str = "pool",
 ) -> Dict[str, Any]:
     """导入 canonical Tushare 前复权日线。
 
@@ -530,7 +537,7 @@ def import_quotes(
         return {"ok": False, "error": "Tushare token 未配置或 tushare 不可用"}
 
     pool = _get_pool_filters()
-    query = _quote_pool_query(pool)
+    query = _quote_scope_query(scope, pool)
     stocks = list(store.db[store.collections["basic_info"]].find(
         query,
         {"code": 1, "name": 1, "list_date": 1, "_id": 0},
@@ -557,12 +564,12 @@ def import_quotes(
         stocks = [stock for stock in stocks if str(stock.get("code") or "").zfill(6) in gap_plan]
         print(
             f"扫描缺口完成: range={normalized_start}..{normalized_end}, "
-            f"gap_codes={scanned_gap_codes}, import_targets={len(stocks)}"
+            f"gap_codes={scanned_gap_codes}, import_targets={len(stocks)}, scope={scope}"
         )
 
     print(
         f"导入 Tushare 前复权日线: stocks={len(stocks)}, end={end}, "
-        f"rate_limit={rate_limit_per_minute}/min, repair_missing={repair_missing}"
+        f"rate_limit={rate_limit_per_minute}/min, repair_missing={repair_missing}, scope={scope}"
     )
     for i, stock in enumerate(stocks, start=1):
         code = str(stock.get("code") or "").zfill(6)
@@ -670,6 +677,7 @@ def import_quotes(
         "ok": failed == 0,
         "source": "tushare",
         "adjust": "qfq",
+        "scope": scope,
         "stocks": len(stocks),
         "imported": imported,
         "failed": failed,
@@ -1976,6 +1984,8 @@ def main() -> None:
                         help="import-quotes 每分钟最大 Tushare 调用数，默认 160")
     parser.add_argument("--repair-missing", action="store_true",
                         help="import-quotes 先扫描 start/end 区间缺口，再只补缺口股票")
+    parser.add_argument("--scope", choices=["pool", "universe"], default="pool",
+                        help="import-quotes 覆盖范围：pool=策略池，universe=全A股")
     args = parser.parse_args()
 
     if args.command == "config-check":
@@ -2015,6 +2025,7 @@ def main() -> None:
             sleep_seconds=args.sleep,
             rate_limit_per_minute=args.rate_limit_per_minute,
             repair_missing=args.repair_missing,
+            scope=args.scope,
         )
         print(result)
 
