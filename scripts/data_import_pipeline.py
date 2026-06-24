@@ -320,6 +320,34 @@ def _normalize_trade_date(value: Optional[str]) -> Optional[str]:
     return None
 
 
+def _parse_trade_date_flexible(value: Any) -> Optional[datetime]:
+    text = str(value or "").strip()
+    if not text or text == "无":
+        return None
+    patterns = ("%Y-%m-%d", "%Y%m%d", "%d %b %Y", "%d %B %Y")
+    candidates = [text, text.title(), text.upper()]
+    for candidate in candidates:
+        for pattern in patterns:
+            try:
+                return datetime.strptime(candidate, pattern).replace(tzinfo=timezone.utc)
+            except ValueError:
+                continue
+    return None
+
+
+def _latest_doc_by_trade_date(coll, query: Dict[str, Any], projection: Dict[str, Any], limit: int = 120) -> Optional[Dict[str, Any]]:
+    best_doc: Optional[Dict[str, Any]] = None
+    best_dt: Optional[datetime] = None
+    for doc in coll.find(query, projection).limit(limit):
+        dt = _parse_trade_date_flexible(doc.get("trade_date"))
+        if dt is None:
+            continue
+        if best_dt is None or dt > best_dt:
+            best_dt = dt
+            best_doc = doc
+    return best_doc
+
+
 def _find_quote_gaps(
     store: MongoFactorDataStore,
     stocks: List[Dict[str, Any]],
@@ -1660,18 +1688,60 @@ def data_check(store: MongoFactorDataStore) -> Dict[str, Any]:
         quotes = store.get_recent_quotes(code, 3, market="港股")
         if quotes:
             latest = quotes[0].get("trade_date", "?")
-            age = (_utc_now() - datetime.strptime(str(latest), "%Y-%m-%d").replace(tzinfo=timezone.utc)).days
-            status = "✅" if age <= 2 else ("⚠️" if age <= 4 else "🔴")
+            latest_dt = _parse_trade_date_flexible(latest)
+            age = (_utc_now() - latest_dt).days if latest_dt else "?"
+            status = "✅" if isinstance(age, int) and age <= 2 else ("⚠️" if isinstance(age, int) and age <= 4 else "🔴")
             result["checks"].append({
                 "name": f"港股日线({code})", "latest": latest, "age_days": age, "status": status,
             })
-            if age > 2:
+            if isinstance(age, int) and age > 2:
                 result["issues"].append(f"港股{code}日线 {age} 天未更新（最新 {latest}）")
         else:
             result["checks"].append({
                 "name": f"港股日线({code})", "latest": "无", "age_days": "?", "status": "🔴",
             })
             result["issues"].append(f"港股{code}日线: 无数据")
+
+        sb_doc = _latest_doc_by_trade_date(
+            store.db["stock_southbound"],
+            {"code": code},
+            {"trade_date": 1, "_id": 0},
+        )
+        if sb_doc and sb_doc.get("trade_date"):
+            sb_latest = sb_doc["trade_date"]
+            sb_dt = _parse_trade_date_flexible(sb_latest)
+            sb_age = (_utc_now() - sb_dt).days if sb_dt else "?"
+            sb_status = "✅" if isinstance(sb_age, int) and sb_age <= 2 else ("⚠️" if isinstance(sb_age, int) and sb_age <= 4 else "🔴")
+            result["checks"].append({
+                "name": f"港股南向({code})", "latest": sb_latest, "age_days": sb_age, "status": sb_status,
+            })
+            if isinstance(sb_age, int) and sb_age > 2:
+                result["issues"].append(f"港股{code}南向数据 {sb_age} 天未更新（最新 {sb_latest}）")
+        else:
+            result["checks"].append({
+                "name": f"港股南向({code})", "latest": "无", "age_days": "?", "status": "⚠️",
+            })
+
+        ss_doc = _latest_doc_by_trade_date(
+            store.db["stock_shortsell"],
+            {"code": code},
+            {"trade_date": 1, "period": 1, "_id": 0},
+        )
+        if ss_doc and ss_doc.get("trade_date"):
+            ss_latest = ss_doc["trade_date"]
+            ss_dt = _parse_trade_date_flexible(ss_latest)
+            ss_age = (_utc_now() - ss_dt).days if ss_dt else "?"
+            ss_status = "✅" if isinstance(ss_age, int) and ss_age <= 2 else ("⚠️" if isinstance(ss_age, int) and ss_age <= 4 else "🔴")
+            label = f"{ss_latest} ({ss_doc.get('period', '?')})"
+            result["checks"].append({
+                "name": f"港股做空({code})", "latest": label, "age_days": ss_age, "status": ss_status,
+            })
+            if isinstance(ss_age, int) and ss_age > 2:
+                result["issues"].append(f"港股{code}做空数据 {ss_age} 天未更新（最新 {label}）")
+        else:
+            result["checks"].append({
+                "name": f"港股做空({code})", "latest": "无", "age_days": "?", "status": "⚠️",
+            })
 
     # 3. 新架构预计算缓存：趋势 + 因子
     for coll_name, label in [("stock_trends", "趋势缓存"), ("stock_factors", "因子缓存")]:

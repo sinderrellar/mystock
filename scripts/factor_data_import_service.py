@@ -9,8 +9,11 @@ importing the TradingAgents app/worker stack so this project can keep a small
 runtime surface.
 """
 import argparse
+import json
 import os
 import time
+import urllib.parse
+import urllib.request
 from datetime import UTC, datetime, timedelta
 from functools import partial
 from typing import Any, Dict, Iterable, List, Optional
@@ -300,17 +303,20 @@ class MongoFactorDataStore:
     def get_basic(self, code: str) -> Optional[Dict[str, Any]]:
         return self.db[self.collections["basic_info"]].find_one({"code": code})
 
-    def _quote_source_for_code(self, code: str, market: Optional[str] = None) -> str:
+    def _quote_sources_for_code(self, code: str, market: Optional[str] = None) -> List[str]:
         if market == "港股" or len(str(code or "").strip()) == 5:
-            return "akshare_stock_hk_daily"
-        return CANONICAL_QUOTE_SOURCE
+            return ["akshare_stock_hk_daily", "yahoo_hk_daily"]
+        return [CANONICAL_QUOTE_SOURCE]
+
+    def _quote_source_for_code(self, code: str, market: Optional[str] = None) -> str:
+        return self._quote_sources_for_code(code, market)[0]
 
     def get_latest_quote(self, code: str, market: Optional[str] = None) -> Optional[Dict[str, Any]]:
         return self.db[self.collections["daily_quotes"]].find_one(
             {
                 "code": code,
                 "period": "daily",
-                "data_source": self._quote_source_for_code(code, market),
+                "data_source": {"$in": self._quote_sources_for_code(code, market)},
             },
             sort=[("trade_date", -1)],
         )
@@ -320,7 +326,7 @@ class MongoFactorDataStore:
         return self.db[self.collections["daily_quotes"]].count_documents({
             "code": code,
             "period": "daily",
-            "data_source": self._quote_source_for_code(code, market),
+            "data_source": {"$in": self._quote_sources_for_code(code, market)},
         }, limit=limit)
 
     def get_latest_financial(self, code: str) -> Optional[Dict[str, Any]]:
@@ -368,7 +374,7 @@ class MongoFactorDataStore:
             query: Dict[str, Any] = {
                 "code": code,
                 "period": "daily",
-                "data_source": self._quote_source_for_code(code, market),
+                "data_source": {"$in": self._quote_sources_for_code(code, market)},
             }
             if as_of_date:
                 query["trade_date"] = {"$lte": as_of_date}
@@ -1159,29 +1165,94 @@ class FactorDataImporter:
 
     def _fetch_hk_quotes(self, position: Dict[str, Any]) -> List[Dict[str, Any]]:
         code = _clean_code(position.get("code"), "港股")
-        df = self.ak.stock_hk_daily(symbol=code, adjust="qfq")
-        if df is None or df.empty:
-            return []
-        df = df.tail(self.quote_limit)
-        docs = []
-        for _, row in df.iterrows():
-            trade_date = row.get("date") or row.get("日期")
-            docs.append({
-                "code": code,
-                "symbol": code,
-                "market": "港股",
-                "currency": "HKD",
-                "trade_date": str(trade_date)[:10],
-                "open": _safe_float(row.get("open") or row.get("开盘")),
-                "high": _safe_float(row.get("high") or row.get("最高")),
-                "low": _safe_float(row.get("low") or row.get("最低")),
-                "close": _safe_float(row.get("close") or row.get("收盘")),
-                "volume": _safe_float(row.get("volume") or row.get("成交量")),
-                "amount": _safe_float(row.get("amount") or row.get("成交额")),
-                "data_source": "akshare_stock_hk_daily",
-                "period": "daily",
-            })
-        return [doc for doc in docs if doc["trade_date"] and doc["close"]]
+        try:
+            df = self.ak.stock_hk_daily(symbol=code, adjust="qfq")
+            if df is not None and not df.empty:
+                df = df.tail(self.quote_limit)
+                docs = []
+                for _, row in df.iterrows():
+                    trade_date = row.get("date") or row.get("日期")
+                    docs.append({
+                        "code": code,
+                        "symbol": code,
+                        "market": "港股",
+                        "currency": "HKD",
+                        "trade_date": str(trade_date)[:10],
+                        "open": _safe_float(row.get("open") or row.get("开盘")),
+                        "high": _safe_float(row.get("high") or row.get("最高")),
+                        "low": _safe_float(row.get("low") or row.get("最低")),
+                        "close": _safe_float(row.get("close") or row.get("收盘")),
+                        "volume": _safe_float(row.get("volume") or row.get("成交量")),
+                        "amount": _safe_float(row.get("amount") or row.get("成交额")),
+                        "data_source": "akshare_stock_hk_daily",
+                        "period": "daily",
+                    })
+                docs = [doc for doc in docs if doc["trade_date"] and doc["close"]]
+                if docs:
+                    return docs
+        except Exception:
+            pass
+
+        return self._fetch_hk_quotes_via_yahoo(code)
+
+    @staticmethod
+    def _fetch_hk_quotes_via_yahoo(code: str) -> List[Dict[str, Any]]:
+        stripped = code.lstrip("0")
+        symbols = list(dict.fromkeys([
+            f"{stripped.zfill(4)}.HK",
+            f"{stripped}.HK",
+            f"{code}.HK",
+        ]))
+
+        for symbol in symbols:
+            url = (
+                f"https://query1.finance.yahoo.com/v8/finance/chart/"
+                f"{urllib.parse.quote(symbol)}?interval=1d&range=2y&includeAdjustedClose=true"
+            )
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            try:
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    payload = json.loads(resp.read().decode("utf-8"))
+            except Exception:
+                continue
+
+            result = ((payload.get("chart") or {}).get("result") or [None])[0]
+            if not result:
+                continue
+            timestamps = result.get("timestamp") or []
+            quote = ((result.get("indicators") or {}).get("quote") or [None])[0] or {}
+            if not timestamps or not quote:
+                continue
+
+            opens = quote.get("open") or []
+            highs = quote.get("high") or []
+            lows = quote.get("low") or []
+            closes = quote.get("close") or []
+            volumes = quote.get("volume") or []
+            docs: List[Dict[str, Any]] = []
+            for idx, ts in enumerate(timestamps):
+                close = _safe_float(closes[idx] if idx < len(closes) else None)
+                if not close:
+                    continue
+                trade_date = datetime.fromtimestamp(ts, tz=UTC).strftime("%Y-%m-%d")
+                docs.append({
+                    "code": code,
+                    "symbol": code,
+                    "market": "港股",
+                    "currency": "HKD",
+                    "trade_date": trade_date,
+                    "open": _safe_float(opens[idx] if idx < len(opens) else None),
+                    "high": _safe_float(highs[idx] if idx < len(highs) else None),
+                    "low": _safe_float(lows[idx] if idx < len(lows) else None),
+                    "close": close,
+                    "volume": _safe_float(volumes[idx] if idx < len(volumes) else None),
+                    "amount": None,
+                    "data_source": "yahoo_hk_daily",
+                    "period": "daily",
+                })
+            if docs:
+                return docs
+        return []
 
     def _fetch_hk_financial(self, position: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         code = _clean_code(position.get("code"), "港股")
