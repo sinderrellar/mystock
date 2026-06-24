@@ -10,3 +10,6 @@ venv/
 .env.*
 
 logs/*.log
+
+.claude/scheduled_tasks.json
+data/fx_fallback.json
