@@ -296,6 +296,13 @@ def _quote_pool_query(pool: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _a_share_universe_query() -> Dict[str, Any]:
+    return {
+        "display_market": "A股",
+        "market": {"$in": ["主板", "创业板", "科创板"]},
+    }
+
+
 def _normalize_trade_date(value: Optional[str]) -> Optional[str]:
     if not value:
         return None
@@ -327,6 +334,7 @@ def _find_quote_gaps(
     expected_dates = [row["_id"] for row in date_rows]
     if not expected_dates:
         return {}
+    expected_positions = {day: idx for idx, day in enumerate(expected_dates)}
 
     code_to_stock = {
         str(stock.get("code") or "").zfill(6): stock
@@ -357,14 +365,149 @@ def _find_quote_gaps(
         missing_dates = [day for day in expected_dates if day not in seen_dates]
         if not missing_dates:
             continue
+        ranges: List[Dict[str, str]] = []
+        range_start = missing_dates[0]
+        prev_day = missing_dates[0]
+        for day in missing_dates[1:]:
+            if expected_positions[day] != expected_positions[prev_day] + 1:
+                ranges.append({
+                    "start_date": range_start.replace("-", ""),
+                    "end_date": prev_day.replace("-", ""),
+                })
+                range_start = day
+            prev_day = day
+        ranges.append({
+            "start_date": range_start.replace("-", ""),
+            "end_date": prev_day.replace("-", ""),
+        })
         gap_plan[code] = {
             "code": code,
             "name": stock.get("name"),
             "list_date": stock.get("list_date"),
             "start_date": missing_dates[0].replace("-", ""),
             "missing_dates": missing_dates,
+            "ranges": ranges,
         }
     return gap_plan
+
+
+def _remaining_missing_dates(quotes_coll, code: str, missing_dates: List[str]) -> List[str]:
+    if not missing_dates:
+        return []
+    existing_dates = {
+        doc["trade_date"]
+        for doc in quotes_coll.find(
+            {
+                "code": code,
+                "data_source": "tushare",
+                "period": "daily",
+                "trade_date": {"$in": missing_dates},
+            },
+            {"trade_date": 1, "_id": 0},
+        )
+    }
+    return [day for day in missing_dates if day not in existing_dates]
+
+
+def _summarize_quote_coverage(
+    store: MongoFactorDataStore,
+    quotes_coll,
+    recent_dates: List[str],
+    expected_codes: set,
+    latest_trade_date: str,
+    label: str,
+) -> Optional[Dict[str, Any]]:
+    if not expected_codes or not recent_dates:
+        return None
+
+    docs = quotes_coll.find(
+        {
+            "period": "daily",
+            "data_source": store.quote_source,
+            "trade_date": {"$in": recent_dates},
+            "code": {"$in": list(expected_codes)},
+        },
+        {"code": 1, "trade_date": 1, "_id": 0},
+    )
+    seen_by_code: Dict[str, set] = {code: set() for code in expected_codes}
+    for doc in docs:
+        code = str(doc.get("code") or "").zfill(6)
+        trade_date = doc.get("trade_date")
+        if code and trade_date:
+            seen_by_code.setdefault(code, set()).add(trade_date)
+
+    latest_day = recent_dates[-1]
+    late_start = []
+    stale_tail = []
+    sporadic = []
+    latest_only = []
+
+    for code in sorted(expected_codes):
+        seen = seen_by_code.get(code, set())
+        missing = [day for day in recent_dates if day not in seen]
+        if not missing:
+            continue
+        first_seen = min(seen) if seen else None
+        last_seen = max(seen) if seen else None
+        basic = store.db[store.collections["basic_info"]].find_one(
+            {"code": code},
+            {"name": 1, "_id": 0},
+        ) or {}
+        item = {
+            "code": code,
+            "name": basic.get("name", ""),
+            "missing_days": len(missing),
+            "first_seen": first_seen,
+            "last_seen": last_seen,
+            "missing_sample": missing[:5],
+        }
+
+        if first_seen and all(day < first_seen for day in missing):
+            late_start.append(item)
+            continue
+        if last_seen and all(day > last_seen for day in missing):
+            if len(missing) == 1 and missing[0] == latest_day:
+                latest_only.append(item)
+            else:
+                stale_tail.append(item)
+            continue
+        sporadic.append(item)
+
+    latest_codes = seen_by_code
+    latest_count = sum(1 for code in expected_codes if latest_trade_date in latest_codes.get(code, set()))
+    coverage_summary = {
+        "label": label,
+        "window_start": recent_dates[0],
+        "window_end": recent_dates[-1],
+        "pool_size": len(expected_codes),
+        "latest_count": latest_count,
+        "latest_missing": len(expected_codes) - latest_count,
+        "late_start_count": len(late_start),
+        "stale_tail_count": len(stale_tail),
+        "latest_only_count": len(latest_only),
+        "sporadic_count": len(sporadic),
+        "late_start_sample": late_start[:5],
+        "stale_tail_sample": stale_tail[:5],
+        "latest_only_sample": latest_only[:5],
+        "sporadic_sample": sporadic[:5],
+    }
+    status = "✅" if not sporadic and not latest_only else "⚠️"
+    if coverage_summary["latest_missing"] > max(5, len(expected_codes) // 20):
+        status = "⚠️"
+    return {
+        "name": f"A股日线覆盖分类({label})",
+        "latest": (
+            f"latest_missing={coverage_summary['latest_missing']}, "
+            f"late_start={coverage_summary['late_start_count']}, "
+            f"stale_tail={coverage_summary['stale_tail_count']}, "
+            f"latest_only={coverage_summary['latest_only_count']}, "
+            f"sporadic={coverage_summary['sporadic_count']}"
+        ),
+        "count": len(expected_codes),
+        "age_days": "—",
+        "status": status,
+        "coverage_summary": coverage_summary,
+    }
 
 
 def import_quotes(
@@ -400,6 +543,8 @@ def import_quotes(
     fallback_used = 0
     latest_date = None
     scanned_gap_codes = 0
+    unresolved_gap_codes = 0
+    unresolved_gap_dates = 0
     end = _normalize_tushare_date(end_date) or datetime.now().strftime("%Y%m%d")
     normalized_end = _normalize_trade_date(end) or end
     limiter = SlidingWindowRateLimiter(rate_limit_per_minute)
@@ -425,73 +570,96 @@ def import_quotes(
             skipped += 1
             continue
 
-        start = None
+        fetch_ranges: List[Dict[str, str]] = []
         if repair_missing and code in gap_plan:
-            start = gap_plan[code]["start_date"]
+            fetch_ranges = gap_plan[code].get("ranges") or []
         else:
             start = _normalize_tushare_date(start_date)
-        if not start:
-            latest = quotes_coll.find_one(
-                {"code": code, "period": "daily", "data_source": "tushare"},
-                {"trade_date": 1, "_id": 0},
-                sort=[("trade_date", -1)],
-            )
-            if latest and latest.get("trade_date"):
-                start = _next_date(str(latest["trade_date"]))
-            else:
-                list_date = str(stock.get("list_date") or "").replace("-", "")
-                start = list_date if len(list_date) == 8 else "19900101"
+            if not start:
+                latest = quotes_coll.find_one(
+                    {"code": code, "period": "daily", "data_source": "tushare"},
+                    {"trade_date": 1, "_id": 0},
+                    sort=[("trade_date", -1)],
+                )
+                if latest and latest.get("trade_date"):
+                    start = _next_date(str(latest["trade_date"]))
+                else:
+                    list_date = str(stock.get("list_date") or "").replace("-", "")
+                    start = list_date if len(list_date) == 8 else "19900101"
+            if start <= end:
+                fetch_ranges = [{"start_date": start, "end_date": end}]
 
-        if start > end:
+        if not fetch_ranges:
             skipped += 1
             continue
 
+        imported_this_code = 0
         try:
-            limiter.acquire()
-            df, fallback_reason = _fetch_tushare_qfq_bar(ts, pro, _ts_code(code), start, end)
-            if fallback_reason:
-                fallback_used += 1
-            if df is None or df.empty:
-                skipped += 1
-                continue
-
-            docs = []
-            for _, row in df.iterrows():
-                trade_date = str(row.get("trade_date") or "")
-                if len(trade_date) == 8:
-                    trade_date = f"{trade_date[:4]}-{trade_date[4:6]}-{trade_date[6:]}"
-                close = _safe_float(row.get("close"))
-                if not trade_date or not close:
+            for fetch_range in fetch_ranges:
+                start = fetch_range["start_date"]
+                range_end = fetch_range["end_date"]
+                if start > range_end:
                     continue
-                docs.append({
-                    "code": code,
-                    "symbol": code,
-                    "market": "A股",
-                    "currency": "CNY",
-                    "trade_date": trade_date,
-                    "open": _safe_float(row.get("open")),
-                    "high": _safe_float(row.get("high")),
-                    "low": _safe_float(row.get("low")),
-                    "close": close,
-                    "pre_close": _safe_float(row.get("pre_close"), None),
-                    "change": _safe_float(row.get("change"), None),
-                    "pct_chg": _safe_float(row.get("pct_chg"), None),
-                    "volume": _safe_float(row.get("vol"), 0) * 100,
-                    "amount": _safe_float(row.get("amount"), 0) * 1000,
-                    "data_source": "tushare",
-                    "period": "daily",
-                    "adjust": "qfq",
-                })
-            if not docs:
+                limiter.acquire()
+                df, fallback_reason = _fetch_tushare_qfq_bar(ts, pro, _ts_code(code), start, range_end)
+                if fallback_reason:
+                    fallback_used += 1
+                if df is None or df.empty:
+                    continue
+
+                docs = []
+                for _, row in df.iterrows():
+                    trade_date = str(row.get("trade_date") or "")
+                    if len(trade_date) == 8:
+                        trade_date = f"{trade_date[:4]}-{trade_date[4:6]}-{trade_date[6:]}"
+                    close = _safe_float(row.get("close"))
+                    if not trade_date or not close:
+                        continue
+                    docs.append({
+                        "code": code,
+                        "symbol": code,
+                        "market": "A股",
+                        "currency": "CNY",
+                        "trade_date": trade_date,
+                        "open": _safe_float(row.get("open")),
+                        "high": _safe_float(row.get("high")),
+                        "low": _safe_float(row.get("low")),
+                        "close": close,
+                        "pre_close": _safe_float(row.get("pre_close"), None),
+                        "change": _safe_float(row.get("change"), None),
+                        "pct_chg": _safe_float(row.get("pct_chg"), None),
+                        "volume": _safe_float(row.get("vol"), 0) * 100,
+                        "amount": _safe_float(row.get("amount"), 0) * 1000,
+                        "data_source": "tushare",
+                        "period": "daily",
+                        "adjust": "qfq",
+                    })
+                if not docs:
+                    continue
+                count = store.upsert_quotes(docs)
+                imported += count
+                imported_this_code += count
+                doc_latest = max(d["trade_date"] for d in docs)
+                latest_date = max(latest_date or doc_latest, doc_latest)
+
+            if imported_this_code == 0:
                 skipped += 1
                 continue
-            count = store.upsert_quotes(docs)
-            imported += count
-            doc_latest = max(d["trade_date"] for d in docs)
-            latest_date = max(latest_date or doc_latest, doc_latest)
         except Exception as exc:
             failed += 1
             print(f"  {code} Tushare 日线失败: {exc}")
+            continue
+
+        if repair_missing and code in gap_plan:
+            remaining = _remaining_missing_dates(quotes_coll, code, gap_plan[code].get("missing_dates") or [])
+            if remaining:
+                unresolved_gap_codes += 1
+                unresolved_gap_dates += len(remaining)
+                if unresolved_gap_codes <= 20:
+                    print(
+                        f"  未补齐 {code} {stock.get('name','')}: "
+                        f"{len(remaining)} 天, sample={remaining[:5]}"
+                    )
 
         if i % 100 == 0:
             print(f"  进度: {i}/{len(stocks)} imported={imported}, failed={failed}, skipped={skipped}, fallback={fallback_used}")
@@ -510,6 +678,8 @@ def import_quotes(
         "latest": latest_date,
         "repair_missing": repair_missing,
         "gap_codes": scanned_gap_codes,
+        "unresolved_gap_codes": unresolved_gap_codes,
+        "unresolved_gap_dates": unresolved_gap_dates,
         "rate_limit_per_minute": rate_limit_per_minute,
     }
 
@@ -1396,17 +1566,20 @@ def data_check(store: MongoFactorDataStore) -> Dict[str, Any]:
     """数据健康检查 — 检查各数据集新鲜度。"""
     from collections import Counter
 
-    result = {"ok": True, "checks": [], "issues": []}
+    result = {"ok": True, "checks": [], "issues": [], "notes": []}
     now = _utc_now()
 
     # 1. A股日线
     qc = store.db[store.collections["daily_quotes"]]
-    a_dates = Counter()
-    for d in qc.find(
-        {"period": "daily", "data_source": store.quote_source},
-        {"trade_date": 1},
-    ).sort("trade_date", -1).limit(20000):
-        a_dates[d["trade_date"]] += 1
+    a_dates = Counter({
+        row["_id"]: row["count"]
+        for row in qc.aggregate([
+            {"$match": {"period": "daily", "data_source": store.quote_source}},
+            {"$group": {"_id": "$trade_date", "count": {"$sum": 1}}},
+            {"$sort": {"_id": -1}},
+            {"$limit": 120},
+        ], allowDiskUse=True)
+    })
     a_latest = max(a_dates.keys()) if a_dates else "无"
     a_age = (_utc_now() - datetime.strptime(str(a_latest), "%Y-%m-%d").replace(tzinfo=timezone.utc)).days
     a_status = "✅" if a_age <= 2 else ("⚠️" if a_age <= 4 else "🔴")
@@ -1416,6 +1589,62 @@ def data_check(store: MongoFactorDataStore) -> Dict[str, Any]:
     })
     if a_age > 2:
         result["issues"].append(f"A股日线 {a_age} 天未更新（最新 {a_latest}）")
+    else:
+        recent_dates = sorted(a_dates.keys())[-60:]
+
+        pool = _get_pool_filters()
+        pool_query = _quote_pool_query(pool)
+        pool_codes = {
+            str(doc.get("code") or "").zfill(6)
+            for doc in store.db[store.collections["basic_info"]].find(
+                pool_query,
+                {"code": 1, "_id": 0},
+            )
+            if doc.get("code")
+        }
+        universe_codes = {
+            str(doc.get("code") or "").zfill(6)
+            for doc in store.db[store.collections["basic_info"]].find(
+                _a_share_universe_query(),
+                {"code": 1, "_id": 0},
+            )
+            if doc.get("code")
+        }
+
+        pool_check = _summarize_quote_coverage(
+            store, qc, recent_dates, pool_codes, a_latest, "策略池"
+        )
+        universe_check = _summarize_quote_coverage(
+            store, qc, recent_dates, universe_codes, a_latest, "全A股"
+        )
+        if pool_check:
+            result["checks"].append(pool_check)
+            summary = pool_check["coverage_summary"]
+            if summary.get("late_start_count"):
+                result["notes"].append(
+                    "策略池 A股日线存在历史起点较晚股票，通常更像新近纳入股票池或源端历史可得性问题"
+                )
+            if summary.get("stale_tail_count"):
+                result["notes"].append(
+                    "策略池 A股日线存在尾部停更股票，通常更像停牌、长期异常或源端尾部缺失"
+                )
+            if summary.get("latest_only_count"):
+                result["issues"].append(
+                    f"策略池 A股日线最新交易日仍有 {summary['latest_only_count']} 只单日缺口"
+                    f"（如 {', '.join(i['code'] for i in summary['latest_only_sample'][:5])}）"
+                )
+            if summary.get("sporadic_count"):
+                result["issues"].append(
+                    f"策略池 A股日线存在 {summary['sporadic_count']} 只零星断点股票"
+                    f"（如 {', '.join(i['code'] for i in summary['sporadic_sample'][:5])}）"
+                )
+        if universe_check:
+            result["checks"].append(universe_check)
+            u = universe_check["coverage_summary"]
+            if u["latest_missing"] > len(pool_codes):
+                result["notes"].append(
+                    "全A股覆盖明显低于基础信息股票总数，说明当前行情层仍是策略池优先，并非全市场全量入库"
+                )
 
     # 2. 港股日线（持仓）
     hk_codes = [p["code"] for p in _load_portfolio_hk_stocks()]
@@ -1844,6 +2073,36 @@ def main() -> None:
         print("=" * 50)
         for c in result["checks"]:
             print(f"  {c['status']} {c['name']}: {c['latest']} ({c['age_days']}天前, {c.get('count', '?')}条)")
+            summary = c.get("coverage_summary")
+            if summary:
+                if summary.get("late_start_sample"):
+                    sample = ", ".join(
+                        f"{item['code']}({item['first_seen']})"
+                        for item in summary["late_start_sample"]
+                    )
+                    print(f"      历史起点晚 sample: {sample}")
+                if summary.get("stale_tail_sample"):
+                    sample = ", ".join(
+                        f"{item['code']}({item['last_seen']})"
+                        for item in summary["stale_tail_sample"]
+                    )
+                    print(f"      尾部停更 sample: {sample}")
+                if summary.get("latest_only_sample"):
+                    sample = ", ".join(
+                        f"{item['code']}({item['last_seen']})"
+                        for item in summary["latest_only_sample"]
+                    )
+                    print(f"      最新单日缺口 sample: {sample}")
+                if summary.get("sporadic_sample"):
+                    sample = ", ".join(
+                        f"{item['code']}({item['missing_days']}天)"
+                        for item in summary["sporadic_sample"]
+                    )
+                    print(f"      零星断点 sample: {sample}")
+        if result.get("notes"):
+            print("\n说明:")
+            for note in result["notes"]:
+                print(f"  - {note}")
         if result["issues"]:
             print(f"\n⚠️ 发现问题:")
             for i in result["issues"]:
