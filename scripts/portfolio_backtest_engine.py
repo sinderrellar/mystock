@@ -835,6 +835,7 @@ def run_attribution(
                             "execute_date": next_date,
                             "code": action["code"],
                             "side": "SELL",
+                            "reason": action.get("reason", "CLOSE信号"),
                         })
 
     reports: Dict[str, Any] = {}

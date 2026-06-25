@@ -1,0 +1,31 @@
+# 虚拟量化账户配置文件
+# 用途：与真实封仓组合隔离，专门用于 buy_plan -> entry -> risk -> sizing -> controller 的纸面交易验证。
+
+account:
+  broker: "Paper Quant"
+  base_currency: "CNY"
+  total_assets: 1000000
+  cash: 1000000
+  cash_by_currency:
+    CNY: 1000000
+  fx_rates_to_base:
+    CNY: 1
+    HKD: auto
+    USD: auto
+  risk_profile: "aggressive"
+  target:
+    max_single_position_pct: 20
+    max_industry_position_pct: 30
+    min_cash_pct: 10
+    profit_target_pct: 30
+    max_drawdown_pct: 20
+    strategy_goal: "量化策略验证"
+
+positions: []
+
+watchlist: []
+
+notes:
+  - "这是虚拟量化账户，不代表真实持仓。"
+  - "真实封仓组合继续使用 data/portfolio.yaml。"
+  - "v1 阶段只用于隔离组合状态；交易流水和每日净值后续再持久化。"

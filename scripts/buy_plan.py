@@ -578,13 +578,13 @@ class BuyPlanEngine:
 
 
 
-    def _get_portfolio_codes(self) -> set:
+    def _get_portfolio_codes(self, portfolio_path: Optional[str] = None) -> set:
 
         try:
 
             from portfolio_state_loader import load_portfolio_yaml
 
-            data = load_portfolio_yaml()
+            data = load_portfolio_yaml(portfolio_path)
 
             return {str(p.get("code", "")).strip()
                     for p in (data.get("positions") or [])
@@ -604,7 +604,9 @@ class BuyPlanEngine:
 
             apply_portfolio_penalty: bool = True,
 
-            portfolio_codes: Optional[set] = None) -> Dict[str, Any]:
+            portfolio_codes: Optional[set] = None,
+
+            portfolio_path: Optional[str] = None) -> Dict[str, Any]:
 
         # 解析 "today" → 实际日期
 
@@ -778,7 +780,7 @@ class BuyPlanEngine:
 
         if apply_portfolio_penalty:
 
-            portfolio_codes = portfolio_codes if portfolio_codes is not None else self._get_portfolio_codes()
+            portfolio_codes = portfolio_codes if portfolio_codes is not None else self._get_portfolio_codes(portfolio_path)
 
         else:
 
@@ -994,6 +996,9 @@ def main():
     parser.add_argument("--no-trace", action="store_true",
 
                        help="不写入 buy_plan_snapshots 留痕集合")
+    parser.add_argument("--portfolio", "-p", default=None,
+
+                       help="指定 portfolio YAML；影响已持仓降权，默认 data/portfolio.yaml")
 
     args = parser.parse_args()
 
@@ -1011,7 +1016,9 @@ def main():
 
                         enrich_limit=args.enrich, industries=industries,
 
-                        target_date=args.date)
+                        target_date=args.date,
+
+                        portfolio_path=args.portfolio)
 
     if not args.no_trace and not report.get("error"):
 
@@ -1026,6 +1033,8 @@ def main():
             "target_date": args.date,
 
             "industries": industries,
+
+            "portfolio": args.portfolio,
 
         })
 

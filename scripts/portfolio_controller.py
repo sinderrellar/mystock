@@ -286,7 +286,7 @@ def evaluate(
     }
 
 
-def run(date: str = None) -> Dict[str, Any]:
+def run(date: str = None, portfolio_path: str = None) -> Dict[str, Any]:
     """主入口：编排全链路 buy_plan → entry → risk → sizing → controller。
 
     调用昨天写的六个 engine，不替代任何模块的计算。
@@ -304,11 +304,17 @@ def run(date: str = None) -> Dict[str, Any]:
 
     # ── ① 候选池 ──
     bp = BuyPlanEngine(mongo_store=mongo_store)
-    bp_result = bp.run(top_n=10, target_date=date, initial_limit=5000, enrich_limit=0)
+    bp_result = bp.run(
+        top_n=10,
+        target_date=date,
+        initial_limit=5000,
+        enrich_limit=0,
+        portfolio_path=portfolio_path,
+    )
     candidates = bp_result.get("recommendations", [])
 
     # ── ② 组合级数据（新链路专用，不再调用旧 portfolio_strategy.review）──
-    portfolio_state = build_live_state(mongo_store=mongo_store)
+    portfolio_state = build_live_state(path=portfolio_path, mongo_store=mongo_store)
     pf_meta = portfolio_state["pf_meta"]
     pos_list = portfolio_state["pos_list"]
     bp_market = bp_result.get("market_context") or bp_result.get("market", {})
@@ -792,10 +798,11 @@ def main():
         description="Portfolio Controller — 新架构主链路 (buy_plan -> entry -> risk -> sizing -> controller)"
     )
     parser.add_argument("--date", "-d", default=None, help="指定日期 YYYY-MM-DD；默认使用最新缓存/实时数据")
+    parser.add_argument("--portfolio", "-p", default=None, help="指定 portfolio YAML；默认 data/portfolio.yaml")
     parser.add_argument("--json", action="store_true", help="输出 JSON，便于 Claude/下游解析")
     args = parser.parse_args()
 
-    result = run(date=args.date)
+    result = run(date=args.date, portfolio_path=args.portfolio)
     if args.json:
         print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
     else:
