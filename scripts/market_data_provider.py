@@ -51,6 +51,10 @@ def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+# 市场情绪日级缓存：情绪基于日线（盘中不变），跨 review 复用，避免每次拉指数/资金流
+_MARKET_SENTIMENT_CACHE: Dict[str, Dict[str, Any]] = {}
+
+
 def _parse_date(value: Optional[str]) -> Optional[datetime]:
     """解析多种日期格式：ISO8601 / YYYYMMDD / YYYY-MM-DD。"""
     if not value:
@@ -78,11 +82,22 @@ def _parse_date(value: Optional[str]) -> Optional[datetime]:
 
 
 def _data_age_days(data_date: Optional[str]) -> Optional[float]:
-    """计算数据距今天数，无法解析则返回 None。"""
+    """计算数据距今的「交易日」数（跳过周末），无法解析则返回 None。
+
+    用交易日而非日历天：避免周五收盘数据在周一被误判为「过期 3 天」，
+    触发不必要的 Yahoo 兜底（组合全景慢的根因之一，2026-09-07）。
+    """
     dt = _parse_date(data_date)
     if dt is None:
         return None
-    return round((_utc_now() - dt).total_seconds() / 86400, 2)
+    today = _utc_now().date()
+    d = dt.date()
+    days = 0
+    while d < today:
+        d += timedelta(days=1)
+        if d.weekday() < 5:  # 周一~周五计为交易日
+            days += 1
+    return float(days)
 
 
 def _freshness(data_date: Optional[str], max_age_days: float = 1.0) -> Dict[str, Any]:
@@ -599,12 +614,30 @@ class MarketDataProvider:
         except Exception as exc:
             return {"available": False, "source": "akshare", "reason": str(exc)}
 
+    def get_52w_range(self, code: str) -> Dict[str, Optional[float]]:
+        """从本地日线计算 52 周（约 250 交易日）最高/最低价。
+
+        腾讯 A 股接口无 52 周高低字段（曾误把 f47 涨停价 / f48 跌停价写入），
+        故 52 周区间统一改从日线计算，与 range_position（120日区间）同源、口径一致。
+        """
+        if not self.mongo_available:
+            return {"high": None, "low": None}
+        quotes = self.mongo.get_recent_quotes(code, limit=250)
+        if not quotes:
+            return {"high": None, "low": None}
+        highs = [q.get("high") for q in quotes if isinstance(q.get("high"), (int, float))]
+        lows = [q.get("low") for q in quotes if isinstance(q.get("low"), (int, float))]
+        if not highs or not lows:
+            return {"high": None, "low": None}
+        return {"high": round(max(highs), 4), "low": round(min(lows), 4)}
+
     def _quote_from_mongo(self, code: str) -> Dict[str, Any]:
         if not self.mongo_available:
             return {"available": False, "source": "none", "reason": "MongoDB 不可用"}
         basic = self.mongo.get_basic(code)
         if not basic:
             return {"available": False, "source": "none", "reason": "MongoDB 无此股票"}
+        r52 = self.get_52w_range(code)
         return {
             "available": True,
             "source": "mongodb",
@@ -614,8 +647,8 @@ class MarketDataProvider:
                 "price_to_book": _to_float(basic.get("pb"), None),
                 "dividend_yield": _to_float(basic.get("dividend_yield"), None),
                 "market_cap": _to_float(basic.get("total_mv"), None),
-                "fifty_two_week_high": _to_float(basic.get("fifty_two_week_high"), None),
-                "fifty_two_week_low": _to_float(basic.get("fifty_two_week_low"), None),
+                "fifty_two_week_high": r52["high"],
+                "fifty_two_week_low": r52["low"],
                 "turnover_rate": _to_float(basic.get("turnover_rate"), None),
                 "latest_amount": _to_float(basic.get("latest_amount"), None),
             },
@@ -647,6 +680,13 @@ class MarketDataProvider:
         """
         result = {"bars": [], "data_date": None, "stale": False, "source": "none"}
 
+        # 历史模式：as_of_date 指定在过去 → MongoDB 里 <= as_of_date 的数据就是
+        # 该日期的正确快照，不因相对"今天"过期而走 Yahoo 补齐（避免 look-ahead +
+        # precompute 对每只股票逐次网络请求导致极慢）。实时模式（as_of_date 为 None
+        # 或今天/未来）才在数据过期时走 Yahoo。
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        historical_mode = bool(as_of_date) and as_of_date < today_str
+
         if self.mongo_available:
             quotes = self.mongo.get_recent_quotes(code, limit=days, as_of_date=as_of_date)
             if quotes:
@@ -655,7 +695,7 @@ class MarketDataProvider:
                 result["source"] = "mongodb"
                 age = _data_age_days(result["data_date"])
                 result["stale"] = (age is not None and age > 1)
-                if not result["stale"]:
+                if not result["stale"] or historical_mode:
                     return result
                 # MongoDB 数据过期，继续走 Yahoo 补齐
                 result["stale_reason"] = f"数据截止 {result['data_date']}（{age:.0f}天前）"
@@ -736,6 +776,49 @@ class MarketDataProvider:
         self._yahoo_bars_cache[cache_key] = bars
         return bars
 
+    def _get_tencent_bars(self, symbol: str, days: int) -> List[Dict[str, Any]]:
+        """腾讯日线 K 线（symbol 形如 sh000001 / sz399006），返回倒序（最新在前）。
+
+        字段顺序 [trade_date, open, close, high, low, volume]。
+        用腾讯而非 Yahoo 的原因：query1.finance.yahoo.com 在本环境对指数/个股一律 403。
+        """
+        params = urllib.parse.urlencode({"param": f"{symbol},day,,,{days},qfq"})
+        url = f"https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?{params}"
+        request = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        try:
+            with urllib.request.urlopen(request, timeout=8) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+        except Exception:
+            return []
+
+        try:
+            node = payload["data"][symbol]
+        except (KeyError, TypeError):
+            return []
+        rows = node.get("day") or node.get("qfqday") or []
+        if not rows:
+            return []
+
+        bars: List[Dict[str, Any]] = []
+        for row in rows:
+            if not row or len(row) < 5:
+                continue
+            close = _to_float(row[2])
+            if close <= 0:
+                continue
+            bars.append({
+                "trade_date": str(row[0]),
+                "open": _to_float(row[1]),
+                "high": _to_float(row[3]),
+                "low": _to_float(row[4]),
+                "close": close,
+                "volume": _to_float(row[5]) if len(row) > 5 else None,
+                "data_source": "tencent",
+            })
+
+        # 腾讯返回升序（最旧在前），截取最近 days 条并倒序，与 _get_yahoo_bars 一致
+        return bars[-days:][::-1]
+
     def _write_bars_to_mongo(self, code: str, bars: List[Dict[str, Any]]) -> None:
         """将 Yahoo 获取的 bars 回写到 MongoDB，补全 code + period 字段。"""
         if not self.mongo_available:
@@ -781,9 +864,13 @@ class MarketDataProvider:
             return self._unavailable(f"历史行情样本不足: {len(bars)}")
 
         # 注入实时价格：如果最新日线不是今天的，用当前价补一条"今日K线"
+        # 仅在实时模式（未指定 as_of_date，或 as_of_date 为今天/未来）注入；
+        # 历史预计算/回测（as_of_date 在过去）不注入 —— 既避免 look-ahead，
+        # 也避免 precompute 对每只股票逐次网络查价导致极慢。
         today_str = datetime.now().strftime("%Y-%m-%d")
         latest_bar_date = bars[0].get("trade_date", "") if bars else ""
-        if latest_bar_date != today_str:
+        live_mode = (as_of_date is None) or (as_of_date >= today_str)
+        if live_mode and latest_bar_date != today_str:
             try:
                 price_result = self.get_price(code, market)
                 if price_result.get("available") and price_result.get("price", 0) > 0:
@@ -1031,14 +1118,18 @@ class MarketDataProvider:
     def _macd(self, closes: List[float]) -> Dict[str, Optional[float]]:
         if len(closes) < 35:
             return {"dif": None, "dea": None, "histogram": None}
-        ema12 = self._ema_series(closes, 12)
-        ema26 = self._ema_series(closes, 26)
-        dif = [s - l for s, l in zip(ema12[-len(ema26):], ema26)]
+        # closes 为倒序（最新在前），反转成正序后 EMA 才能沿时间正确递推。
+        # 返回值必须取序列末尾（递推完全后的最新值），而非 dif[0]——后者是 EMA
+        # 初值位置，恒等于 closes[0]-closes[0]=0，是此前 MACD 全 0 的根因。
+        seq = list(reversed(closes))
+        ema12 = self._ema_series(seq, 12)
+        ema26 = self._ema_series(seq, 26)
+        dif = [s - l for s, l in zip(ema12, ema26)]
         dea = self._ema_series(dif, 9)
         return {
-            "dif": round(dif[0], 4),
-            "dea": round(dea[0], 4),
-            "histogram": round((dif[0] - dea[0]) * 2, 4),
+            "dif": round(dif[-1], 4),
+            "dea": round(dea[-1], 4),
+            "histogram": round((dif[-1] - dea[-1]) * 2, 4),
         }
 
     def _bollinger(self, closes: List[float], period: int, rate: float) -> Dict[str, Optional[float]]:
@@ -1771,15 +1862,24 @@ class MarketDataProvider:
     # ================================================================
 
     def get_market_sentiment(self) -> Dict[str, Any]:
-        """获取 A 股整体市场情绪（基于指数涨跌 + 北向资金）。"""
+        """获取 A 股整体市场情绪（基于指数涨跌 + 北向资金）。
+
+        指数用腾讯符号（sh000001=上证综指、sz399006=创业板指、sh000300=沪深300）；
+        Yahoo 在本环境 403，已切腾讯。结果按日缓存（情绪基于日线，盘中不变，跨 review 复用）。
+        """
+        today = datetime.now().strftime("%Y-%m-%d")
+        cached = _MARKET_SENTIMENT_CACHE.get(today)
+        if cached is not None:
+            return cached
+
         indices = {
-            "上证指数": "000001",
-            "创业板指": "399006",
-            "沪深300": "000300",
+            "上证指数": "sh000001",
+            "创业板指": "sz399006",
+            "沪深300": "sh000300",
         }
         sentiments = {}
-        for name, code in indices.items():
-            bars = self.get_bars(code, "A股", days=30).get("bars", [])
+        for name, symbol in indices.items():
+            bars = self._get_tencent_bars(symbol, 30)
             if len(bars) < 5:
                 sentiments[name] = {"available": False}
                 continue
@@ -1833,12 +1933,14 @@ class MarketDataProvider:
         else:
             mood = "neutral"
 
-        return {"available": True, "mood": mood, "avg_return_20d": round(avg_20d, 2),
-                "avg_z_score": round(avg_z if z_scores else 0, 2),
-                "indices": sentiments,
-                "north_bound": north_flow, "margin": margin,
-                "market_moneyflow": mkt_mf,
-                "industry_moneyflow": ind_mf}
+        result = {"available": True, "mood": mood, "avg_return_20d": round(avg_20d, 2),
+                  "avg_z_score": round(avg_z if z_scores else 0, 2),
+                  "indices": sentiments,
+                  "north_bound": north_flow, "margin": margin,
+                  "market_moneyflow": mkt_mf,
+                  "industry_moneyflow": ind_mf}
+        _MARKET_SENTIMENT_CACHE[today] = result
+        return result
 
     def _get_north_bound_flow(self) -> Dict[str, Any]:
         """获取近期北向/南向成交净买额。

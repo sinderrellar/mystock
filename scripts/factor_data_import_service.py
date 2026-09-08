@@ -11,7 +11,12 @@ runtime surface.
 import argparse
 import os
 import time
-from datetime import UTC, datetime
+from datetime import datetime
+try:  # Python 3.11+ 暴露 UTC 常量；3.9/3.10 用 timezone.utc 回退
+    from datetime import UTC
+except ImportError:
+    from datetime import timezone
+    UTC = timezone.utc
 from functools import partial
 from typing import Any, Dict, Iterable, List, Optional
 
@@ -510,7 +515,11 @@ class FactorDataImporter:
 
     @staticmethod
     def _fetch_basic_via_tencent_a(code: str) -> Optional[Dict[str, Any]]:
-        """腾讯A股行情：PE=f39, PB=f46, 总市值(亿)=f45, 52周高/低=f47/f48。"""
+        """腾讯A股行情：PE=f39, PB=f46, 总市值(亿)=f45。
+
+        注意：腾讯 A 股接口没有 52 周高低字段（f47/f48 分别是涨停价/跌停价），
+        52 周区间由 MarketDataProvider.get_52w_range 从日线计算，勿在此写入。
+        """
         import urllib.request
         prefix = "sh" if code.startswith(("5", "6", "9")) else "sz"
         url = f"https://qt.gtimg.cn/q={prefix}{code}"
@@ -531,8 +540,6 @@ class FactorDataImporter:
                 "pb": _safe_float(fields[46] if len(fields) > 46 else None, None),
                 "total_mv": round(_safe_float(fields[45] if len(fields) > 45 else None, 0) * 1e8, 2) if _safe_float(fields[45] if len(fields) > 45 else None, None) else None,
                 "latest_amount": _safe_float(fields[37] if len(fields) > 37 else None, None),
-                "fifty_two_week_high": _safe_float(fields[47] if len(fields) > 47 else None, None),
-                "fifty_two_week_low": _safe_float(fields[48] if len(fields) > 48 else None, None),
                 "data_source": "tencent_a",
             }
         except Exception:
@@ -647,7 +654,8 @@ class FactorDataImporter:
                 "display_market": "A股",
                 "name": row.get("名称") or code,
                 "close": _safe_float(row.get("最新价")),
-                "latest_amount": _safe_float(row.get("成交额")),
+                # 东财 spot 的「成交额」是元，全系统 latest_amount 统一用万元（见 buy_plan.py L169）
+                "latest_amount": _safe_float(row.get("成交额")) / 1e4 if _safe_float(row.get("成交额")) is not None else None,
                 "turnover_rate": _safe_float(row.get("换手率")),
                 "pe": _safe_float(row.get("市盈率-动态") or row.get("市盈率")),
                 "pb": _safe_float(row.get("市净率")),
@@ -1188,11 +1196,11 @@ class FactorDataImporter:
     def _a_board(self, code: str) -> str:
         if code.startswith("688"):
             return "科创板"
-        if code.startswith("300"):
+        if code.startswith(("300", "301", "302")):
             return "创业板"
-        if code.startswith(("600", "601", "603", "605", "000", "001", "002")):
+        if code.startswith(("600", "601", "603", "605", "000", "001", "002", "003")):
             return "主板"
-        if code.startswith(("8", "4")):
+        if code.startswith(("8", "4", "920")):
             return "北交所"
         return "A股"
 

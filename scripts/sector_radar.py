@@ -30,16 +30,27 @@ sys.path.insert(0, PROJECT_ROOT)
 sys.path.insert(0, os.path.join(PROJECT_ROOT, "scripts"))
 
 
+_RADAR_CONFIG_CACHE: Optional[Dict[str, Any]] = None
+
+
 def _get_radar_config() -> Dict[str, Any]:
-    """从 config 读取 sector_radar 阈值，带默认值兜底。"""
+    """从 config 读取 sector_radar 阈值，带默认值兜底。
+
+    进程内缓存一次：本函数在 compute_heatmap 的行业循环里被反复调用（每行业×2），
+    若每次读盘解析 config_complete.yaml，数百次 YAML 解析会把组合全景拖慢十几秒。
+    """
+    global _RADAR_CONFIG_CACHE
+    if _RADAR_CONFIG_CACHE is not None:
+        return _RADAR_CONFIG_CACHE
     import yaml
     config_path = os.path.join(PROJECT_ROOT, "config", "config_complete.yaml")
     try:
         with open(config_path) as f:
             cfg = yaml.safe_load(f)
-        return (cfg.get("pyramid_middle_layer", {}).get("sector_radar", {}))
+        _RADAR_CONFIG_CACHE = cfg.get("pyramid_middle_layer", {}).get("sector_radar", {})
     except Exception:
-        return {}
+        _RADAR_CONFIG_CACHE = {}
+    return _RADAR_CONFIG_CACHE
 
 from factor_data_import_service import MongoFactorDataStore, _load_mongodb_config
 

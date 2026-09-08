@@ -1,0 +1,42 @@
+# 股票数据导入定时任务 — 适配本机 (/data2/liuyu20/mystock)
+# 环境: /data2/liuyu20/mystock/venv/bin/python (含 akshare/pandas/pymongo 等)
+# MongoDB: localhost:27017 (mongod 已 fork 启动)
+# 注意: compute-signals 子命令本机不存在，已跳过
+
+SHELL=/bin/bash
+PATH=/data2/liuyu20/mystock/venv/bin:/usr/bin:/bin
+
+# 每个交易日 11:37 15:17 — 宏观新闻（午盘结束+收盘后）
+37 11,15 * * 1-5 cd /data2/liuyu20/mystock/scripts && /data2/liuyu20/mystock/venv/bin/python data_import_pipeline.py import-macro-news >> ../logs/import.log 2>&1
+
+# 每个交易日 20:30 — 龙虎榜（盘后发布，17:00 太早拿不到当天）
+30 20 * * 1-5 cd /data2/liuyu20/mystock/scripts && /data2/liuyu20/mystock/venv/bin/python data_import_pipeline.py import-top-list >> ../logs/import.log 2>&1
+
+# 每个交易日 17:30 — 全市场资金流
+30 17 * * 1-5 cd /data2/liuyu20/mystock/scripts && /data2/liuyu20/mystock/venv/bin/python data_import_pipeline.py import-market-moneyflow >> ../logs/import.log 2>&1
+
+# 每个交易日 17:31 — 行业资金流向
+31 17 * * 1-5 cd /data2/liuyu20/mystock/scripts && /data2/liuyu20/mystock/venv/bin/python data_import_pipeline.py import-industry-moneyflow >> ../logs/import.log 2>&1
+
+# 每个交易日 18:30 — 港股做空+南向+A股股息率
+30 18 * * 1-5 cd /data2/liuyu20/mystock/scripts && /data2/liuyu20/mystock/venv/bin/python data_import_pipeline.py import-hk-shortsell >> ../logs/import.log 2>&1 && /data2/liuyu20/mystock/venv/bin/python data_import_pipeline.py import-hk-southbound >> ../logs/import.log 2>&1 && /data2/liuyu20/mystock/venv/bin/python data_import_pipeline.py import-dividend-yield >> ../logs/import.log 2>&1
+
+# 每个交易日 19:00 — 持仓+观察池深度数据（原含 compute-signals，已跳过）
+0 19 * * 1-5 cd /data2/liuyu20/mystock/scripts && /data2/liuyu20/mystock/venv/bin/python data_import_pipeline.py import-universe-quotes --quote-limit 5000 >> ../logs/import.log 2>&1
+
+# 每周日 20:00 — 全市场基础信息
+0 20 * * 0 cd /data2/liuyu20/mystock/scripts && /data2/liuyu20/mystock/venv/bin/python data_import_pipeline.py import-universe-light >> ../logs/import.log 2>&1
+
+# 每周六 10:17 — PE缺失修复
+17 10 * * 6 cd /data2/liuyu20/mystock/scripts && /data2/liuyu20/mystock/venv/bin/python data_import_pipeline.py repair-pe >> ../logs/import.log 2>&1
+
+# 每个交易日 19:30 — 个股资金流批量导入（带限速，~30分钟）
+30 19 * * 1-5 cd /data2/liuyu20/mystock/scripts && /data2/liuyu20/mystock/venv/bin/python data_import_pipeline.py import-stock-moneyflow >> ../logs/import.log 2>&1
+
+# 每个交易日 20:00 — 一致预期批量导入（带限速，~40分钟）
+0 20 * * 1-5 cd /data2/liuyu20/mystock/scripts && /data2/liuyu20/mystock/venv/bin/python data_import_pipeline.py import-stock-forecast >> ../logs/import.log 2>&1
+
+# 每个交易日 14:55 — 沪深港通资金流
+55 14 * * 1-5 cd /data2/liuyu20/mystock/scripts && /data2/liuyu20/mystock/venv/bin/python data_import_pipeline.py import-hsgt-flow >> ../logs/import.log 2>&1
+# 每个交易日 21:00 — 信号预计算（依赖 19:00 universe-quotes 导完当天日线）
+0 21 * * 1-5 cd /data2/liuyu20/mystock/scripts && /data2/liuyu20/mystock/venv/bin/python precompute_history.py --date today --workers 8 >> ../logs/precompute.log 2>&1

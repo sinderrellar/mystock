@@ -287,6 +287,48 @@ class PortfolioStrategy:
             parts.append(f"行业前{entry['industry_pct']}%")
         return " " + " ".join(parts)
 
+    def _latest_factor_trade_date(self) -> str:
+        """stock_factors 集合的最新 trade_date（本次 review 内缓存一次）。
+
+        用集合最新日期做「新鲜」判据，而非「距今天数」——长假期间 precompute
+        停留在节前最后交易日，但那是可用的最新数据，不该误判为过期。
+        """
+        if hasattr(self, "_latest_factor_td"):
+            return self._latest_factor_td
+        td = ""
+        try:
+            doc = self.data_provider.mongo.db["stock_factors"].find_one(
+                {}, {"trade_date": 1}, sort=[("trade_date", -1)])
+            td = (doc or {}).get("trade_date") or ""
+        except Exception:
+            td = ""
+        self._latest_factor_td = td
+        return td
+
+    def _factor_from_cache(self, code: str) -> Optional[Dict[str, Any]]:
+        """从 stock_factors 读该股所属商业组的因子；未命中/非最新返回 None。
+
+        返回 {composite_score, factor_scores} 或 None（触发现场兜底重算）。
+        只在 trade_date 与集合最新一致时采信，避免 precompute 落后时静默喂旧因子。
+        """
+        try:
+            latest_td = self._latest_factor_trade_date()
+            if not latest_td:
+                return None
+            fac_doc = self.data_provider.mongo.db["stock_factors"].find_one(
+                {"code": code, "trade_date": latest_td},
+                {"group": 1, "factors": 1, "_id": 0})
+        except Exception:
+            return None
+        if not fac_doc:
+            return None
+        group = fac_doc.get("group", "")
+        fs = (fac_doc.get("factors") or {}).get(group, {}) or {}
+        scores = fs.get("factor_scores") or {}
+        if not scores:
+            return None
+        return {"composite_score": fs.get("composite_score", 0), "factor_scores": scores}
+
     def review(self, ensure_data: bool = False) -> Dict[str, Any]:
         account = self.data.get("account", {})
         target = account.get("target", {}) or {}
@@ -539,15 +581,17 @@ class PortfolioStrategy:
                     row["pe_percentile_self"] = sig_doc["pe_percentile"]
             except Exception:
                 row["pe_percentile_self"] = None
-            # 多因子
+            # 多因子（优先读预计算 stock_factors 商业组因子，miss/过期才现场兜底）
             try:
-                stock_doc = self.data_provider.mongo.get_basic(code)
-                if stock_doc is None:
-                    stock_doc = {"code": code, "close": row.get("current_price", 0)}
-                quotes = self.data_provider.mongo.get_recent_quotes(code, 260)
-                fin = self.data_provider.mongo.get_latest_financial(code)
-                pyramid = self.signal_collector._get_pyramid_strategy()
-                factor_raw = pyramid.calculate_composite_score(stock_doc, quotes, fin)
+                factor_raw = self._factor_from_cache(code)
+                if factor_raw is None:
+                    stock_doc = self.data_provider.mongo.get_basic(code)
+                    if stock_doc is None:
+                        stock_doc = {"code": code, "close": row.get("current_price", 0)}
+                    quotes = self.data_provider.mongo.get_recent_quotes(code, 260)
+                    fin = self.data_provider.mongo.get_latest_financial(code)
+                    pyramid = self.signal_collector._get_pyramid_strategy()
+                    factor_raw = pyramid.calculate_composite_score(stock_doc, quotes, fin)
                 row["factor"] = {
                     "composite_score": factor_raw.get("composite_score", 0),
                     "factor_scores": factor_raw.get("factor_scores", {}),
@@ -1277,11 +1321,11 @@ class PortfolioStrategy:
                     boll_low = current_price * 0.93
                     supports.append(("布林下轨", round(boll_low, 2), 1))
 
-        # 52周低点（重要心理支撑）
+        # 52周低点（重要心理支撑）——从日线计算，腾讯A股接口无52周字段
         try:
-            basic = self.data_provider.mongo.get_basic(code)
-            if basic:
-                low52 = basic.get("fifty_two_week_low")
+            r52 = self.data_provider.get_52w_range(code)
+            if r52:
+                low52 = r52.get("low")
                 if low52 and 0 < low52 < current_price:
                     supports.append(("52周低点", float(low52), 3))
         except Exception:

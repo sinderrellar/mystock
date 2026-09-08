@@ -9,6 +9,7 @@ engine in portfolio_strategy.py.
 """
 import math
 import os
+from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 
@@ -43,6 +44,9 @@ class StrategySignalCollector:
         self.config_path = config_path or DEFAULT_CONFIG
         self._pyramid_strategy = None
         self._data_provider = None
+        # 情绪信号缓存：内存 + MongoDB（按「标的+市场+日期」），见 _event_signal
+        self._event_cache: Dict[str, Dict[str, Any]] = {}
+        self._event_cache_col = None
 
     def collect_for_position(self, position: Dict[str, Any]) -> Dict[str, Any]:
         signals = {
@@ -156,12 +160,73 @@ class StrategySignalCollector:
         except Exception as exc:
             return self._unavailable(f"多因子信号异常: {exc}")
 
+    # ── 情绪信号缓存 ────────────────────────────────────────────────
+    def _get_event_cache_col(self):
+        """懒加载 MongoDB 情绪信号缓存集合（7 天 TTL，跨进程/重启复用）。"""
+        if self._event_cache_col is None:
+            try:
+                from factor_data_import_service import _load_mongodb_config, MongoFactorDataStore
+
+                mongodb_config = _load_mongodb_config(self.config_path)
+                store = MongoFactorDataStore(mongodb_config)
+                col = store.db["event_signal_cache"]
+                col.create_index("created_at", expireAfterSeconds=7 * 86400)
+                self._event_cache_col = col
+            except Exception:
+                self._event_cache_col = None
+        return self._event_cache_col
+
+    def _event_cache_key(self, code: str, market: str) -> str:
+        """情绪信号缓存 key：标的代码 + 市场 + 当日日期（跨天自动失效）。"""
+        return f"{code}:{market or 'A股'}:{datetime.now().strftime('%Y-%m-%d')}"
+
+    def _lookup_event_cache(self, key: str) -> Optional[Dict[str, Any]]:
+        col = self._get_event_cache_col()
+        if col is None:
+            return None
+        try:
+            doc = col.find_one({"_id": key})
+            if not doc:
+                return None
+            doc.pop("_id", None)
+            doc.pop("created_at", None)
+            return doc
+        except Exception:
+            return None
+
+    def _save_event_cache(self, key: str, result: Dict[str, Any]) -> None:
+        col = self._get_event_cache_col()
+        if col is None:
+            return
+        try:
+            col.update_one(
+                {"_id": key},
+                {"$set": {**result, "created_at": datetime.utcnow()}},
+                upsert=True,
+            )
+        except Exception:
+            pass
+
     def _event_signal(self, position: Dict[str, Any]) -> Dict[str, Any]:
         code = str(position.get("code", "")).strip()
         if not code:
             return self._unavailable("缺少股票代码")
         if position.get("asset_type") == "etf":
             return self._unavailable("ETF 暂不做个股新闻事件分析")
+
+        # 情绪分析缓存：按「标的+市场+日期」缓存当日情绪信号，避免每次刷新重复调 LLM。
+        # 只缓存 available=True 的结果（unavailable 多为暂时性失败，缓存会固化错误）。
+        market = str(position.get("market", "A股"))
+        cache_key = self._event_cache_key(code, market)
+        cached = self._event_cache.get(cache_key)
+        if cached is None:
+            cached = self._lookup_event_cache(cache_key)
+            if cached is not None:
+                self._event_cache[cache_key] = cached
+        if cached is not None:
+            cached = dict(cached)
+            cached["cached"] = True
+            return cached
 
         try:
             provider = self._get_data_provider()
@@ -195,7 +260,7 @@ class StrategySignalCollector:
             if negative_keywords:
                 risks.append(f"负面关键词: {'、'.join(list(dict.fromkeys(negative_keywords))[:5])}")
 
-            return {
+            result = {
                 "available": True,
                 "source": "event_driven_strategy",
                 "news_count": len(news_list),
@@ -222,6 +287,10 @@ class StrategySignalCollector:
                 "supporting_factors": supporting,
                 "risk_factors": risks,
             }
+            # 写缓存（内存 + MongoDB）；失败不影响返回
+            self._event_cache[cache_key] = result
+            self._save_event_cache(cache_key, result)
+            return result
         except Exception as exc:
             return self._unavailable(f"事件信号异常: {exc}")
 

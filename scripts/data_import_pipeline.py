@@ -206,22 +206,29 @@ def import_universe_quotes(store: MongoFactorDataStore, limit: int = 800) -> Dic
     print(f"  已有近期日线: {len(recent_codes)} 只")
 
     # 从基础信息中取大盘股（成交额排序），排除已有近期数据的
-    # Layer 0 生存过滤：成交额≥5000万 + 市值>50亿 + PE>0且<200
-    query = {
+    # Layer 0 生存过滤：成交额≥5000万 + 市值>50亿 + PE>0且<50
+    # 兼容轻量基础信息（import-universe-light 不写入 total_mv/pe）：字段缺失时降级为仅成交额过滤
+    base_query = {
         "display_market": "A股",
         "market": {"$in": ["主板", "创业板", "科创板"]},
         "latest_amount": {"$gte": 5_000},  # 万元单位，5000万
-        "total_mv": {"$gte": 5_000_000_000},
-        "pe": {"$gt": 0, "$lt": 50},  # 对齐价值因子 high 阈值(25)，留余量,
         "code": {"$nin": list(recent_codes)},
     }
+    strict_query = {**base_query, "total_mv": {"$gte": 5_000_000_000}, "pe": {"$gt": 0, "$lt": 50}}
+
     all_stocks = list(store.db[store.collections["basic_info"]].find(
-        query, {"code": 1, "name": 1, "latest_amount": 1, "_id": 0},
+        strict_query, {"code": 1, "name": 1, "latest_amount": 1, "_id": 0},
     ).sort("latest_amount", -1).limit(limit))
+
+    if len(all_stocks) < max(1, limit // 2):
+        print(f"  严格条件（市值+PE）仅命中 {len(all_stocks)} 只，可能是轻量基础信息；降级为成交额过滤")
+        all_stocks = list(store.db[store.collections["basic_info"]].find(
+            base_query, {"code": 1, "name": 1, "latest_amount": 1, "_id": 0},
+        ).sort("latest_amount", -1).limit(limit))
 
     if not all_stocks:
         return {"ok": True, "imported": 0, "skipped": len(recent_codes),
-                "message": "全部大盘股已有近期日线"}
+                "message": "全部大盘股已有近期日线或基础信息不足"}
 
     todo = [{"code": s["code"], "name": s.get("name", s["code"]),
              "market": "A股", "asset_type": "stock"} for s in all_stocks]
@@ -717,55 +724,107 @@ def repair_pe(store: MongoFactorDataStore) -> Dict[str, Any]:
 # ================================================================
 
 def import_market_moneyflow(store: MongoFactorDataStore) -> Dict[str, Any]:
-    """导入全市场主力资金流向（HTTP API，避免 tushare 包 numpy 兼容问题）。"""
+    """导入全市场主力资金流向。
+
+    优先 tushare moneyflow_mkt_dc；无权限/失败时降级到 AKShare
+    stock_market_fund_flow（东财大盘资金流，120 条历史）。
+    写入 market_moneyflow 的 net_amount 统一用「元」——
+    下游 market_data_provider._get_market_moneyflow 用 /1e8 转亿。
+    """
     import requests
 
     config_path = os.path.join(PROJECT_ROOT, "config", "config_complete.yaml")
     with open(config_path) as f:
         cfg = yaml.safe_load(f)
     token = ((cfg.get("data_sources") or {}).get("tushare") or {}).get("token", "")
-    if not token:
-        return {"ok": False, "error": "缺少 Tushare token"}
 
-    end = datetime.now().strftime("%Y%m%d")
-    start = (datetime.now() - timedelta(days=30)).strftime("%Y%m%d")
-    try:
-        resp = requests.post(
-            "https://api.tushare.pro",
-            json={
-                "api_name": "moneyflow_mkt_dc",
-                "token": token,
-                "params": {"start_date": start, "end_date": end},
-                "fields": "trade_date,net_amount,buy_elg_amount,buy_lg_amount,buy_md_amount,buy_sm_amount",
-            },
-            timeout=15,
-        )
-        data = resp.json()
-        if data.get("code") != 0:
-            return {"ok": False, "error": data.get("msg", "API错误")}
-        items = data["data"]["items"]
-    except Exception as e:
-        return {"ok": False, "error": str(e)}
+    # --- 1) 优先 tushare ---
+    if token:
+        end = datetime.now().strftime("%Y%m%d")
+        start = (datetime.now() - timedelta(days=30)).strftime("%Y%m%d")
+        try:
+            resp = requests.post(
+                "https://api.tushare.pro",
+                json={
+                    "api_name": "moneyflow_mkt_dc",
+                    "token": token,
+                    "params": {"start_date": start, "end_date": end},
+                    "fields": "trade_date,net_amount,buy_elg_amount,buy_lg_amount,buy_md_amount,buy_sm_amount",
+                },
+                timeout=15,
+            )
+            data = resp.json()
+            if data.get("code") == 0 and data.get("data", {}).get("items"):
+                items = data["data"]["items"]
+                count = 0
+                for item in items:
+                    if not item or len(item) < 6:
+                        continue
+                    doc = {
+                        "trade_date": item[0],
+                        "net_amount": float(item[1]) if len(item) > 1 and item[1] else 0,
+                        "buy_elg_amount": float(item[2]) if len(item) > 2 and item[2] else 0,
+                        "buy_lg_amount": float(item[3]) if len(item) > 3 and item[3] else 0,
+                        "buy_md_amount": float(item[4]) if len(item) > 4 and item[4] else 0,
+                        "buy_sm_amount": float(item[5]) if len(item) > 5 and item[5] else 0,
+                        "source": "tushare",
+                        "updated_at": datetime.now(),
+                    }
+                    store.db["market_moneyflow"].update_one(
+                        {"trade_date": item[0]}, {"$set": doc}, upsert=True)
+                    count += 1
+                return {"ok": True, "imported": count, "range": f"{start}-{end}",
+                        "source": "tushare"}
+        except Exception:
+            pass  # 降级到 akshare
+
+    # --- 2) 降级 AKShare（东财大盘资金流） ---
+    # 东财 push2his 接口偶发 RemoteDisconnected（临时限流，几分钟后自愈），
+    # 加重试/退避，避免每日 17:30 定时任务撞上限流直接失败。
+    import akshare as ak
+    df = None
+    last_err = None
+    for attempt in range(3):
+        try:
+            df = ak.stock_market_fund_flow()
+            if df is not None and not getattr(df, "empty", True):
+                break
+        except Exception as e:  # noqa: BLE001
+            last_err = e
+            time.sleep(3 * (attempt + 1))
+    if df is None or getattr(df, "empty", True):
+        return {"ok": False, "error": f"tushare 不可用且 akshare 兜底失败: {last_err}"}
+
+    def _fv(v):
+        try:
+            return float(v) if v is not None else 0.0
+        except (TypeError, ValueError):
+            return 0.0
 
     count = 0
-    for item in items:
-        if not item or len(item) < 6:
+    for _, row in df.iterrows():
+        date_str = str(row.get("日期", "")).strip()
+        if not date_str:
             continue
+        # akshare 日期形如 2026-09-04，统一转 8 位无横线，保证字符串排序正确
+        trade_date = date_str.replace("-", "") if len(date_str) == 10 else date_str
         doc = {
-            "trade_date": item[0],
-            "net_amount": float(item[1]) if len(item) > 1 and item[1] else 0,
-            "buy_elg_amount": float(item[2]) if len(item) > 2 and item[2] else 0,
-            "buy_lg_amount": float(item[3]) if len(item) > 3 and item[3] else 0,
-            "buy_md_amount": float(item[4]) if len(item) > 4 and item[4] else 0,
-            "buy_sm_amount": float(item[5]) if len(item) > 5 and item[5] else 0,
-            "source": "tushare",
+            "trade_date": trade_date,
+            "net_amount": _fv(row.get("主力净流入-净额")),
+            "buy_elg_amount": _fv(row.get("超大单净流入-净额")),
+            "buy_lg_amount": _fv(row.get("大单净流入-净额")),
+            "buy_md_amount": _fv(row.get("中单净流入-净额")),
+            "buy_sm_amount": _fv(row.get("小单净流入-净额")),
+            "close_sh": _fv(row.get("上证-收盘价")),
+            "pct_change_sh": _fv(row.get("上证-涨跌幅")),
+            "source": "akshare_stock_market_fund_flow",
             "updated_at": datetime.now(),
         }
         store.db["market_moneyflow"].update_one(
-            {"trade_date": item[0]}, {"$set": doc}, upsert=True)
+            {"trade_date": trade_date}, {"$set": doc}, upsert=True)
         count += 1
 
-    return {"ok": True, "imported": count, "range": f"{start}-{end}"}
+    return {"ok": True, "imported": count, "source": "akshare_stock_market_fund_flow"}
 
 
 # ================================================================
@@ -966,8 +1025,15 @@ def import_top_list(store: MongoFactorDataStore) -> Dict[str, Any]:
         return {"ok": False, "error": "缺少 Tushare token"}
 
     total = 0
-    for i in range(5):
-        dt = (datetime.now() - timedelta(days=i)).strftime("%Y%m%d")
+    # 回溯最近 5 个交易日（跳过周末）：龙虎榜是盘后发布，周末/节假日会让
+    # 「5 个自然日」窗口漏掉工作日，导致当天数据补不进。这里按交易日滚动。
+    trade_dates: List[str] = []
+    cursor = datetime.now()
+    while len(trade_dates) < 5:
+        if cursor.weekday() < 5:  # 周一~周五计为交易日
+            trade_dates.append(cursor.strftime("%Y%m%d"))
+        cursor -= timedelta(days=1)
+    for dt in trade_dates:
         try:
             resp = requests.post(
                 "https://api.tushare.pro",
@@ -1014,11 +1080,11 @@ def import_top_list(store: MongoFactorDataStore) -> Dict[str, Any]:
 def _a_board(code: str) -> str:
     if code.startswith("688"):
         return "科创板"
-    if code.startswith("300"):
+    if code.startswith(("300", "301", "302")):
         return "创业板"
     if code.startswith(("600", "601", "603", "605", "000", "001", "002", "003")):
         return "主板"
-    if code.startswith(("8", "4")):
+    if code.startswith(("8", "4", "920")):
         return "北交所"
     return "A股"
 
@@ -1072,7 +1138,8 @@ def import_universe_light(store: MongoFactorDataStore) -> Dict[str, Any]:
                 "asset_type": "stock",
                 "close": _safe_float(row.get("最新价")),
                 "pct_chg": _safe_float(row.get("涨跌幅"), None),
-                "latest_amount": _safe_float(row.get("成交额"), None),
+                # Sina spot 的「成交额」是元，全系统 latest_amount 统一用万元（见 buy_plan.py L169）
+                "latest_amount": _safe_float(row.get("成交额"), None) / 1e4 if _safe_float(row.get("成交额"), None) is not None else None,
                 "turnover_rate": _safe_float(row.get("换手率"), None),
                 "industry_code": industry_code if industry_code else None,
                 "industry": industry_code if industry_code else None,
@@ -1123,15 +1190,21 @@ def data_check(store: MongoFactorDataStore) -> Dict[str, Any]:
     a_dates = Counter()
     for d in qc.find({"period": "daily"}, {"trade_date": 1}).sort("trade_date", -1).limit(20000):
         a_dates[d["trade_date"]] += 1
-    a_latest = max(a_dates.keys()) if a_dates else "无"
-    a_age = (_utc_now() - datetime.strptime(str(a_latest), "%Y-%m-%d").replace(tzinfo=timezone.utc)).days
-    a_status = "✅" if a_age <= 2 else ("⚠️" if a_age <= 4 else "🔴")
+    if a_dates:
+        a_latest = max(a_dates.keys())
+        a_age = (_utc_now() - datetime.strptime(str(a_latest), "%Y-%m-%d").replace(tzinfo=timezone.utc)).days
+        a_status = "✅" if a_age <= 2 else ("⚠️" if a_age <= 4 else "🔴")
+        if a_age > 2:
+            result["issues"].append(f"A股日线 {a_age} 天未更新（最新 {a_latest}）")
+    else:
+        a_latest = "无"
+        a_age = "?"
+        a_status = "🔴"
+        result["issues"].append("A股日线: 无数据")
     result["checks"].append({
-        "name": "A股日线", "latest": a_latest, "count": a_dates.get(a_latest, 0),
+        "name": "A股日线", "latest": a_latest, "count": a_dates.get(a_latest, 0) if a_dates else 0,
         "age_days": a_age, "status": a_status,
     })
-    if a_age > 2:
-        result["issues"].append(f"A股日线 {a_age} 天未更新（最新 {a_latest}）")
 
     # 2. 港股日线（持仓）
     hk_codes = [p["code"] for p in _load_portfolio_hk_stocks()]
@@ -1153,19 +1226,31 @@ def data_check(store: MongoFactorDataStore) -> Dict[str, Any]:
             result["issues"].append(f"港股{code}日线: 无数据")
 
     # 3. 信号缓存
-    sc = store.db["stock_signals"]
+    # 兼容新旧两套集合：precompute_history v3 写入 stock_factors/stock_trends/stock_meta，
+    # 老的资金流/一致预期仍写入 stock_signals。以 stock_factors.trade_date 为准判断预计算信号新鲜度。
     sig_dates = Counter()
-    for d in sc.find({}, {"computed_at": 1}).sort("computed_at", -1).limit(5000):
-        sig_dates[d["computed_at"]] += 1
-    sig_latest = max(sig_dates.keys()) if sig_dates else "无"
-    sig_age = (_utc_now() - datetime.strptime(str(sig_latest), "%Y-%m-%d").replace(tzinfo=timezone.utc)).days
-    sig_status = "✅" if sig_age <= 2 else ("⚠️" if sig_age <= 4 else "🔴")
+    for coll_name in ["stock_factors", "stock_signals"]:
+        coll = store.db[coll_name]
+        date_field = "trade_date" if coll_name == "stock_factors" else "computed_at"
+        if coll_name not in store.db.list_collection_names():
+            continue
+        for d in coll.find({}, {date_field: 1}).sort(date_field, -1).limit(5000):
+            sig_dates[d[date_field]] += 1
+    if sig_dates:
+        sig_latest = max(sig_dates.keys())
+        sig_age = (_utc_now() - datetime.strptime(str(sig_latest), "%Y-%m-%d").replace(tzinfo=timezone.utc)).days
+        sig_status = "✅" if sig_age <= 2 else ("⚠️" if sig_age <= 4 else "🔴")
+        if sig_age > 2:
+            result["issues"].append(f"信号缓存 {sig_age} 天未更新")
+    else:
+        sig_latest = "无"
+        sig_age = "?"
+        sig_status = "🔴"
+        result["issues"].append("信号缓存: 无数据")
     result["checks"].append({
-        "name": "信号缓存", "latest": sig_latest, "count": sig_dates.get(sig_latest, 0),
+        "name": "信号缓存", "latest": sig_latest, "count": sig_dates.get(sig_latest, 0) if sig_dates else 0,
         "age_days": sig_age, "status": sig_status,
     })
-    if sig_age > 2:
-        result["issues"].append(f"信号缓存 {sig_age} 天未更新")
 
     # 4. 全市场资金流
     mf = store.db["market_moneyflow"]

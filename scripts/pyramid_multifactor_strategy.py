@@ -578,11 +578,28 @@ class PyramidMultifactorStrategy:
     # ---- 行业横截面归一化 ----
 
     def _get_industry_stats(self) -> Dict[str, Dict]:
-        """懒加载行业统计数据，同一次策略运行中只构建一次。"""
+        """懒加载行业统计数据，同一次策略运行中只构建一次。
+
+        优先读预计算集合 stock_industry_stats（precompute_history.py 每日落库），
+        未命中才现场全市场扫描。目的是消除每次请求对 basic_info 的全表扫描。
+        """
         if self._industry_stats is not None:
             return self._industry_stats
-        self._industry_stats = self._build_industry_stats()
+        cached = self._load_industry_stats_cache()
+        self._industry_stats = cached if cached else self._build_industry_stats()
         return self._industry_stats
+
+    def _load_industry_stats_cache(self) -> Dict[str, Dict]:
+        """读 stock_industry_stats 最新一份行业横截面统计；失败/缺失返回空 dict。"""
+        try:
+            doc = self.data_provider.db["stock_industry_stats"].find_one(
+                {}, {"stats": 1}, sort=[("trade_date", -1)])
+        except Exception:
+            return {}
+        if not doc:
+            return {}
+        stats = doc.get("stats") or {}
+        return stats if isinstance(stats, dict) else {}
 
     def _build_industry_stats(self) -> Dict[str, Dict]:
         """从 MongoDB 构建全行业 PE/PB/ROE/毛利率 排序数组。

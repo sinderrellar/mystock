@@ -1,7 +1,16 @@
 numpy
+scipy
 scikit-learn
 PyYAML
 pymongo
+dnspython
 akshare
 tushare
 requests
+pandas
+beautifulsoup4
+openpyxl
+lxml
+tabulate
+tqdm
+anthropic

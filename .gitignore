@@ -1,0 +1,15 @@
+# Python 缓存
+__pycache__/
+*.py[cod]
+
+# 本机运行时数据 / 日志 / 会话状态（不入库）
+venv/
+logs/
+scripts/logs/
+data/
+.claude/
+mongobin/
+mongodata/
+
+# 误拷入的无关文件（广告日志诊断系统，待清理后移除）
+app.py

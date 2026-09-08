@@ -442,6 +442,21 @@ def _compute_date(store: MongoFactorDataStore, target_date: str,
             if factor_count % 100 == 0:
                 print(f"  factor: {factor_count}/{len(codes)}")
 
+        # ── 7. 写行业横截面统计（供因子百分位归一化，避免每次请求全市场扫描）──
+        try:
+            ind_stats = pyramid._build_industry_stats()
+            if ind_stats:
+                store.db["stock_industry_stats"].update_one(
+                    {"trade_date": target_date},
+                    {"$set": {
+                        "trade_date": target_date,
+                        "stats": ind_stats,
+                        "updated_at": datetime.now(_UTC),
+                    }},
+                    upsert=True)
+        except Exception as exc:  # noqa: BLE001 —— 横截面统计失败不阻塞主流程，下次兜底重建
+            print(f"  industry_stats 写入失败(忽略): {exc}")
+
     elapsed = time.time() - t0
     result = {
         "ok": True, "date": target_date,

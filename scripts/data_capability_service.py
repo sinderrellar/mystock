@@ -8,7 +8,12 @@ knowing about AKShare, MongoDB collections, retry rules, or import commands.
 """
 import argparse
 import os
-from datetime import UTC, datetime
+from datetime import datetime
+try:  # Python 3.11+ 暴露 UTC 常量；3.9/3.10 用 timezone.utc 回退
+    from datetime import UTC
+except ImportError:
+    from datetime import timezone
+    UTC = timezone.utc
 from typing import Any, Dict, List, Optional
 
 from factor_data_import_service import (

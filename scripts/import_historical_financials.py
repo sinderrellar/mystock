@@ -203,6 +203,8 @@ def main():
     parser.add_argument("--codes", help="指定股票代码，逗号分隔")
     parser.add_argument("--start", help="最早 report_period，如 2025-01-01")
     parser.add_argument("--limit", type=int, default=0, help="限制导入数量")
+    parser.add_argument("--only-missing", action="store_true",
+                        help="只导入 stock_financial_data 里还没有财务记录的股票（幂等补缺）")
     args = parser.parse_args()
 
     config_path = os.path.join(PROJECT_ROOT, "config", "config_complete.yaml")
@@ -230,6 +232,12 @@ def main():
 
     if args.limit and args.limit > 0:
         codes = codes[:args.limit]
+
+    if args.only_missing:
+        existing = set(store.db[store.collections["financial_data"]].distinct("code"))
+        before = len(codes)
+        codes = [c for c in codes if c not in existing]
+        print(f"--only-missing: {before} → {len(codes)} 只（跳过已有财务的 {before - len(codes)} 只）")
 
     print(f"导入 {len(codes)} 只股票的历史财务数据")
     if min_period:

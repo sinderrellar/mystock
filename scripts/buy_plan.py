@@ -322,6 +322,67 @@ class BuyPlanEngine:
 
 
 
+    def _get_universe(self) -> List[Dict[str, Any]]:
+
+        """全市场基础信息（供前端初筛漏斗做可配置筛选）。
+
+        与 _broad_screen 的差异：不套 Layer0 硬编码阈值（市值/成交额/PE/板块），
+
+        返回全部 active 股票的基础字段，让初筛的每个阈值都由用户在前端调整。
+        """
+
+        if self._hist:
+
+            return self._hist.get("universe", [])
+
+        coll = self.mongo.db[self.mongo.collections["basic_info"]]
+
+        projection = {
+
+            "code": 1, "name": 1, "close": 1, "pe": 1, "pb": 1,
+
+            "total_mv": 1, "latest_amount": 1, "market": 1,
+
+            "display_market": 1, "industry": 1, "industry_code": 1, "_id": 0,
+
+        }
+
+        raw = list(coll.find({"active": {"$ne": False}}, projection).sort("code", 1))
+
+        out = []
+
+        for s in raw:
+
+            out.append({
+
+                "code": str(s.get("code", "")),
+
+                "name": str(s.get("name", "")),
+
+                "close": _to_float(s.get("close"), None),
+
+                "pe": _to_float(s.get("pe"), None),
+
+                "pb": _to_float(s.get("pb"), None),
+
+                "total_mv": _to_float(s.get("total_mv"), None),
+
+                "latest_amount": _to_float(s.get("latest_amount"), None),
+
+                "market": str(s.get("market", "")),
+
+                "display_market": str(s.get("display_market", "")),
+
+                "industry": str(s.get("industry", "")),
+
+                "industry_code": str(s.get("industry_code", "")),
+
+            })
+
+        return out
+
+
+
     # ================================================================
 
     # 批量补齐数据 + 趋势/因子打分
@@ -678,6 +739,10 @@ class BuyPlanEngine:
 
         candidates = self._broad_screen(industries=industries)
 
+        # 全市场基础信息（供前端初筛漏斗做可配置筛选，如实展示漏斗头部）
+
+        universe = self._get_universe()
+
         if not candidates:
 
             return {"error": "初筛无结果", "candidates": []}
@@ -744,13 +809,13 @@ class BuyPlanEngine:
 
 
 
-        # ── v3 候选池生成：因子评分 + 预过滤 + 排序 ──
+        # ── v3 候选池生成：因子评分 + 打标签（全量，供前端漏斗筛选）──
 
 
 
-        # 计算 alpha_score + 打标签
+        # 计算 alpha_score + 打标签（无条件，含 cycle<0.20 的项）
 
-        passed = []
+        portfolio_codes = self._get_portfolio_codes()
 
         for s in scored:
 
@@ -764,7 +829,7 @@ class BuyPlanEngine:
 
 
 
-            # alpha = 动量 + 周期 + 拐点（权重按牛熊动态调整）
+            # alpha = 动量 + 周期 + 拐点（权重按牛熊动态调整）；原始分不降权
 
             s["alpha_score"] = round(
 
@@ -774,41 +839,51 @@ class BuyPlanEngine:
 
                 + turnaround * alpha_w["turnaround"], 3)
 
-
-
-            # 预过滤：行业极弱不做；弱势市场须 cycle 确认
-
-            if cycle < 0.20:
-
-                continue
-
-            if regime == "weak" and cycle < weak_min_cycle:
-
-                continue
+            s["in_portfolio"] = s["code"] in portfolio_codes
 
 
 
             # 纯标签，不参与过滤
 
-            s["strategy_tags"] = []
+            s["strategy_tags"] = ["动量突破"]
 
             s["tag_momentum"] = True
 
-            s["strategy_tags"].append("动量突破")
+            s["tag_cycle"] = cycle >= 0.20
+
+            s["tag_turnaround"] = turnaround >= 0.7
 
             if cycle >= 0.20:
-
-                s["tag_cycle"] = True
 
                 s["strategy_tags"].append("周期共振")
 
             if turnaround >= 0.7:
 
-                s["tag_turnaround"] = True
-
                 s["strategy_tags"].append("低位拐点")
 
             s["strategy_count"] = len(s["strategy_tags"])
+
+
+
+        # pool：完整打分池（原始 alpha_score，不降权），供前端动态筛选
+
+        pool = sorted(scored, key=lambda x: x["alpha_score"], reverse=True)
+
+
+
+        # 默认过滤：行业极弱不做；弱势市场须 cycle 确认（保留 CLI/旧行为）
+
+        passed = []
+
+        for s in pool:
+
+            if s["cycle_score"] < 0.20:
+
+                continue
+
+            if regime == "weak" and s["cycle_score"] < weak_min_cycle:
+
+                continue
 
             passed.append(s)
 
@@ -818,21 +893,19 @@ class BuyPlanEngine:
 
 
 
-        # 排序输出
+        # 已持仓降权只作用于最终名单（浅拷贝，不污染 pool）
 
-        passed.sort(key=lambda x: x["alpha_score"], reverse=True)
+        final = []
 
-        # 已持仓降权
+        for s in passed[:top_n]:
 
-        portfolio_codes = self._get_portfolio_codes()
+            item = dict(s)
 
-        for s in passed:
+            if item["code"] in portfolio_codes:
 
-            if s["code"] in portfolio_codes:
+                item["alpha_score"] = round(item["alpha_score"] * 0.5, 3)
 
-                s["alpha_score"] = round(s["alpha_score"] * 0.5, 3)
-
-        final = passed[:top_n]
+            final.append(item)
 
 
 
@@ -851,6 +924,10 @@ class BuyPlanEngine:
                 "final": len(final),
 
             },
+
+            "universe": universe,
+
+            "pool": pool,
 
             "recommendations": final,
 
