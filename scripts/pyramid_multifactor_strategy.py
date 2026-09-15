@@ -283,6 +283,28 @@ class PyramidMultifactorStrategy:
                 details['dividend_yield'] = dividend
             except:
                 pass
+
+        # PEG 评分（PE / 业绩预告增速下限，越低越好）
+        # 数据来源：stock.pe + forecast_min/forecast_max（Tushare 业绩预告）
+        # 注意：forecast 增速为百分数数值（如 20 表示 20%），PE 直接相除即得 PEG
+        # 仅当组配置显式提供 peg 阶梯时才参与评分，否则只记录不评分
+        # （避免未配置的组被 _score_metric 兜底打 0.2 分污染均值）
+        peg_scoring = scoring.get('peg', {})
+        pe_val = stock.get('pe') or stock.get('pe_ratio')
+        fc_min = stock.get('forecast_min')
+        fc_max = stock.get('forecast_max')
+        if peg_scoring and pe_val is not None and fc_min is not None and fc_max is not None:
+            try:
+                pe_f = float(pe_val)
+                growth = min(float(fc_min), float(fc_max))
+                if pe_f > 0 and growth > 0:
+                    # 使用预告下限，避免用乐观上限低估 PEG。
+                    peg = pe_f / max(growth, 1.0)
+                    scores['peg'] = self._score_metric(peg, peg_scoring, higher_is_better=False)
+                    details['peg'] = round(peg, 2)
+                    details['peg_growth'] = round(growth, 2)
+            except (TypeError, ValueError):
+                pass
         
         # 计算综合得分
         if scores:
@@ -349,8 +371,12 @@ class PyramidMultifactorStrategy:
             override_weights: 若提供，跳过 config 直接使用这些权重
             override_scoring: 若提供，跳过 config 使用这些评分阶梯（组 config 的 scoring 段）
         """
+        value_stock = dict(stock)
+        for key in ("forecast_min", "forecast_max"):
+            if value_stock.get(key) is None and financial:
+                value_stock[key] = financial.get(key)
         value_score, value_details = self.calculate_value_score(
-            stock, quotes, override_scoring=override_scoring)
+            value_stock, quotes, override_scoring=override_scoring)
         growth_score, growth_details = self.calculate_growth_score(
             stock, financial, override_scoring=override_scoring)
         quality_score, quality_details = self.calculate_quality_score(
@@ -790,6 +816,24 @@ class PyramidMultifactorStrategy:
                 scores['ocf_to_net_income'] = self._score_metric(ocf, ocf_scoring, higher_is_better=True)
                 details['ocf_to_net_income'] = ocf
             except Exception:
+                pass
+
+        # 自由现金流/净利润（盈利质量，越高越好，不做行业归一化）
+        # 数据来源：factor_data_import_service 计算的 free_cash_flow = OCF - CapEx
+        # 仅当组配置显式提供 fcf_to_net_income 阶梯时才参与评分，否则只记录不评分
+        fcf_scoring = scoring.get('fcf_to_net_income', {})
+        fcf = financial.get('free_cash_flow') if financial else None
+        ni = financial.get('net_income') if financial else None
+        if fcf_scoring and fcf is not None and ni is not None:
+            try:
+                fcf_f = float(fcf)
+                ni_f = float(ni)
+                if ni_f > 0:
+                    fcf_ratio = fcf_f / ni_f
+                    scores['fcf_to_net_income'] = self._score_metric(
+                        fcf_ratio, fcf_scoring, higher_is_better=True)
+                    details['fcf_to_net_income'] = round(fcf_ratio, 2)
+            except (TypeError, ValueError):
                 pass
 
         if scores:
@@ -1398,6 +1442,12 @@ class PyramidMultifactorStrategy:
                         parts.append(f"PB:{value_details['pb']}{pct_str}")
                     if 'dividend_yield' in value_details:
                         parts.append(f"股息:{value_details['dividend_yield']}%")
+                    if 'peg' in value_details:
+                        peg = value_details['peg']
+                        peg_flag = " ✓" if peg <= 1.0 else (" ⚠" if peg > 2.0 else "")
+                        g = value_details.get('peg_growth')
+                        g_str = f"(增速{g}%)" if g is not None else ""
+                        parts.append(f"PEG:{peg}{g_str}{peg_flag}")
                     if parts:
                         lines.append(f"     估值: {' | '.join(parts)}")
 
@@ -1419,6 +1469,10 @@ class PyramidMultifactorStrategy:
                         ocf = quality_details['ocf_to_net_income']
                         ocf_flag = " ✓" if ocf >= 0.8 else (" ⚠" if ocf < 0.5 else "")
                         parts.append(f"OCF/NI:{ocf}{ocf_flag}")
+                    if 'fcf_to_net_income' in quality_details:
+                        fcf = quality_details['fcf_to_net_income']
+                        fcf_flag = " ✓" if fcf >= 0.5 else (" ⚠" if fcf < 0 else "")
+                        parts.append(f"FCF/NI:{fcf}{fcf_flag}")
                     decay = quality_details.get('data_freshness_decay', 1.0)
                     if decay < 1.0:
                         parts.append(f"新鲜度:{decay:.0%}")

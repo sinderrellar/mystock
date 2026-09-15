@@ -50,6 +50,8 @@ def evaluate(stock: Dict[str, Any]) -> Dict[str, Any]:
     above_ma20 = price > ma20 if ma20 else None
     ma20_dist = (price - ma20) / ma20 * 100 if ma20 and ma20 > 0 else None
     vol_sig = ti.get("volume_price_signal", "")
+    volume_ratio = ti.get("volume_ratio")
+    max_drawdown_20d = ti.get("max_drawdown_20d_pct")
 
     details = []
 
@@ -85,6 +87,11 @@ def evaluate(stock: Dict[str, Any]) -> Dict[str, Any]:
         else:
             pos_score = 0.2
             details.append(f"距MA20 {ma20_dist:.1f}%，远离均线")
+
+    bias5 = (ti.get("bias") or {}).get("ma5")
+    if bias5 is not None and bias5 > 8:
+        pos_score = min(pos_score, 0.3)
+        details.append(f"BIAS5 {bias5:.1f}% 短线过热")
 
     # ③ 短期动量（20%）
     mom_score = 0.5
@@ -122,6 +129,27 @@ def evaluate(stock: Dict[str, Any]) -> Dict[str, Any]:
         rev_score = min(1.0, rev_score + 0.05)
         details.append(f"KDJ J={kdj_j:.1f} 谷底回升")
 
+    # CCI 超卖共振（P1 新增）：CCI < -100 且回升时加分
+    cci = ti.get("cci14")
+    if cci is not None and cci < -100 and ret_5d is not None and ret_5d >= 0:
+        rev_score = min(1.0, rev_score + 0.05)
+        details.append(f"CCI {cci:.0f} 低位回升")
+
+    # MA 排列结构（P1 新增）：多头排列加成趋势分，空头排列压制
+    ma_alignment = ti.get("ma_alignment")
+    if ma_alignment == "bullish":
+        trend_score = min(1.0, trend_score + 0.1)
+        details.append("MA多头排列(MA5≥MA20≥MA60)")
+    elif ma_alignment == "bearish":
+        trend_score = max(0.0, trend_score - 0.15)
+        details.append("MA空头排列(MA5≤MA20≤MA60)")
+
+    bearish_veto = ma_alignment == "bearish"
+    if (max_drawdown_20d is not None and max_drawdown_20d <= -20
+            and ret_5d is not None and ret_5d < 0):
+        trend_score = max(0.0, trend_score - 0.1)
+        details.append(f"20日最大回撤 {max_drawdown_20d:.1f}% 且仍在下跌")
+
     # ⑤ 量价配合（10%）
     vol_score = 0.5
     if "放量" in str(vol_sig):
@@ -130,6 +158,13 @@ def evaluate(stock: Dict[str, Any]) -> Dict[str, Any]:
     if "缩量" in str(vol_sig):
         vol_score = 0.3
         details.append("缩量信号")
+    if volume_ratio is not None and volume_ratio >= 1.5 and ret_5d is not None:
+        if ret_5d > 0:
+            vol_score = max(vol_score, 0.75)
+            details.append(f"量比 {volume_ratio:.2f} 放量上涨确认")
+        elif ret_5d < 0:
+            vol_score = min(vol_score, 0.2)
+            details.append(f"量比 {volume_ratio:.2f} 放量下跌")
 
     technical_score = 0.30 * trend_score + 0.20 * pos_score \
                     + 0.20 * mom_score + 0.20 * rev_score + 0.10 * vol_score
@@ -147,12 +182,17 @@ def evaluate(stock: Dict[str, Any]) -> Dict[str, Any]:
     entry_score = technical_score
     if technical_score >= 0.55:
         entry_score = min(1.0, technical_score + alpha_bonus)
+    if bearish_veto:
+        entry_score = min(entry_score, 0.44)
+        details.append("MA空头排列，否决新增买入")
 
     # ═══════════════════════════════════════════
     # 统一状态快照（portfolio 直接消费，不重复评估）
     # ═══════════════════════════════════════════
     vol_20d = trend.get("volatility_20d")
-    atr_pct = round(vol_20d / price * 100, 2) if vol_20d and price else None
+    atr_pct = ti.get("atr_20_pct")
+    if atr_pct is None and vol_20d and price:
+        atr_pct = round(vol_20d / price * 100, 2)
 
     cycle = alpha_ctx.get("cycle", 0.5)
     if cycle >= 0.6:   market_regime = "improving"
@@ -182,6 +222,7 @@ def evaluate(stock: Dict[str, Any]) -> Dict[str, Any]:
         "risk": {
             "volatility_20d": vol_20d,
             "atr_pct": atr_pct,
+            "max_drawdown_20d_pct": max_drawdown_20d,
             "vol_regime": "high" if (vol_20d and vol_20d > 3.0) else "normal",
         },
         "market": {

@@ -866,10 +866,10 @@ class FactorDataImporter:
             pass
         # 提取数字和单位
         import re
-        m = re.match(r"([\d.]+)\s*(亿|万)?", text)
+        m = re.match(r"([+-]?[\d,.]+)\s*(亿|万)?", text)
         if not m:
             return None
-        val = float(m.group(1))
+        val = float(m.group(1).replace(",", ""))
         unit = m.group(2)
         if unit == "亿":
             val *= 100_000_000

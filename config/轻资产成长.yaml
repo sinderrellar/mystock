@@ -31,6 +31,12 @@ scoring:
     very_good: 2.0
     good: 1.0
     average: 0.5
+  peg:                        # PE/一致预期增速（越低越好）
+    excellent: 0.5            # PEG≤0.5 → 1.0分
+    very_good: 0.8
+    good: 1.0                 # PEG≤1.0 → 0.7分
+    average: 1.5
+    below_avg: 2.5
 
   # 成长因子（收紧，这是成长股核心）
   revenue_growth:
@@ -74,6 +80,12 @@ scoring:
     good: 0.8
     average: 0.5
     below_avg: 0.3
+  fcf_to_net_income:          # 自由现金流/净利润（盈利质量）
+    excellent: 0.8
+    very_good: 0.6
+    good: 0.5
+    average: 0.2
+    below_avg: 0.0
 
   # 动量因子
   return_1m:

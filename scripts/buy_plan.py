@@ -105,6 +105,26 @@ def _to_float(v: Any, default: float = 0.0) -> float:
         return default
 
 
+def _is_dip_candidate(stock: Dict[str, Any]) -> bool:
+    """低吸：价格未明显过热，且已有短线企稳证据。"""
+    trend = stock.get("trend", {}) or {}
+    ti = trend.get("technical_indicators", {}) or {}
+    bias = ti.get("bias", {}) or {}
+    rsi = _to_float(ti.get("rsi14"), None)
+    bias20 = _to_float(bias.get("ma20"), None)
+    boll_b = _to_float((ti.get("bollinger") or {}).get("percent_b"), None)
+    ret5 = _to_float((trend.get("returns") or {}).get("return_5d"), None)
+    kdj_j = _to_float((ti.get("kdj") or {}).get("j"), None)
+    if ti.get("ma_alignment") == "bearish":
+        return False
+    below_or_near_ma = ((bias20 is not None and bias20 <= 0)
+                        or (boll_b is not None and boll_b <= 0.35)
+                        or (rsi is not None and rsi <= 45))
+    stabilizing = ((ret5 is not None and ret5 >= 0)
+                   or (kdj_j is not None and 0 <= kdj_j <= 30))
+    return below_or_near_ma and stabilizing
+
+
 
 
 
@@ -468,7 +488,14 @@ class BuyPlanEngine:
 
              "volatility_20d": 1, "rsi14": 1, "kdj": 1, "macd": 1,
 
-             "boll_percent_b": 1, "volume_price_signal": 1, "_id": 0}
+             "boll_percent_b": 1, "volume_price_signal": 1,
+
+             # P0/P1 新增指标
+             "atr_20_pct": 1, "bias_ma5": 1, "bias_ma10": 1, "bias_ma20": 1,
+
+             "volume_ratio": 1, "max_drawdown_20d_pct": 1, "cci14": 1,
+
+             "ma_alignment": 1, "daily_quality_score": 1, "_id": 0}
 
         ):
 
@@ -519,6 +546,29 @@ class BuyPlanEngine:
                         "bollinger": {"percent_b": trend_doc.get("boll_percent_b")},
 
                         "volume_price_signal": trend_doc.get("volume_price_signal"),
+
+                        # P0/P1 新增指标（旧文档缺失时为 None，下游已做容错）
+                        "atr_20_pct": trend_doc.get("atr_20_pct"),
+
+                        "bias": {
+
+                            "ma5": trend_doc.get("bias_ma5"),
+
+                            "ma10": trend_doc.get("bias_ma10"),
+
+                            "ma20": trend_doc.get("bias_ma20"),
+
+                        },
+
+                        "volume_ratio": trend_doc.get("volume_ratio"),
+
+                        "max_drawdown_20d_pct": trend_doc.get("max_drawdown_20d_pct"),
+
+                        "cci14": trend_doc.get("cci14"),
+
+                        "ma_alignment": trend_doc.get("ma_alignment"),
+
+                        "daily_quality_score": trend_doc.get("daily_quality_score"),
 
                     },
 
@@ -632,6 +682,20 @@ class BuyPlanEngine:
 
 
 
+    def _get_market_phase(self, breadth_pct: float) -> Dict[str, Any]:
+        """市场阶段判定。数据源不可用时降级为中性，不阻断主流程。"""
+        from market_phase import determine_market_phase, extract_phase_inputs
+
+        market_sentiment = None
+        if not self._hist and self.data is not None:
+            try:
+                market_sentiment = self.data.get_market_sentiment()
+            except Exception:
+                market_sentiment = None
+
+        inputs = extract_phase_inputs(market_sentiment, breadth_pct=breadth_pct)
+        return determine_market_phase(**inputs)
+
     def _get_portfolio_codes(self) -> set:
 
         try:
@@ -734,6 +798,32 @@ class BuyPlanEngine:
 
 
 
+        # 市场阶段判定（宽度 + 指数动量 + 北向 + 两融）
+        from market_phase import format_market_phase
+
+        market_phase = self._get_market_phase(breadth_pct)
+
+        print(format_market_phase(market_phase))
+
+        for ev in market_phase.get("evidence", []):
+
+            print(f"  · {ev}")
+
+        # 下跌期：暂停生成新买入候选（已有持仓由 portfolio_strategy 独立管理）
+        if not market_phase.get("allow_new_buy", True):
+
+            print(f"⚠ 市场阶段为{market_phase.get('label')}，暂停生成买入候选")
+
+            return {"error": f"市场阶段{market_phase.get('label')}，暂停推荐",
+
+                    "breadth_pct": breadth_pct,
+
+                    "market_phase": market_phase,
+
+                    "candidates": []}
+
+
+
         # 补齐因子数据
 
         eff_limit = enrich_limit if enrich_limit > 0 else len(candidates)
@@ -784,6 +874,13 @@ class BuyPlanEngine:
 
             if regime == "weak" and cycle < weak_min_cycle:
 
+                continue
+
+            quality = s.get("trend", {}).get("technical_indicators", {}).get(
+                "daily_quality_score")
+            if quality is not None and quality < 60:
+                continue
+            if market_phase.get("dip_only") and not _is_dip_candidate(s):
                 continue
 
 
@@ -862,6 +959,8 @@ class BuyPlanEngine:
 
                 "alpha_weights": alpha_w,
 
+                "phase": market_phase,
+
             },
 
         }
@@ -883,6 +982,19 @@ def format_buy_plan(report: Dict[str, Any]) -> str:
         f"候选 {pipe.get('candidates','?')} → 有因子 {pipe.get('scored','?')} → "
 
         f"通过 {pipe.get('passed','?')} → 最终 {pipe.get('final','?')}",
+
+    ]
+
+    # 市场阶段（旧报告无此字段时跳过，保持向后兼容）
+    phase = (report.get("market") or {}).get("phase")
+
+    if phase:
+
+        from market_phase import format_market_phase
+
+        lines.append(format_market_phase(phase))
+
+    lines += [
 
         "=" * 90,
 
