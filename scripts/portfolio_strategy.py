@@ -499,7 +499,7 @@ class PortfolioStrategy:
                         dv = mongo_store.db["stock_dividend"].find_one(
                             {"code": row["code"]}, sort=[("trade_date", -1)])
                         if dv:
-                            row["dividend_yield"] = dv.get("dv_ttm") or dv.get("dv_ratio")
+                            row["dividend_yield"] = next((v for v in (dv.get("dv_ttm"), dv.get("dv_ratio")) if v is not None and v == v), None)
                     except Exception:
                         pass
                 # 龙虎榜检测（持仓是否上榜）
@@ -591,7 +591,9 @@ class PortfolioStrategy:
                     quotes = self.data_provider.mongo.get_recent_quotes(code, 260)
                     fin = self.data_provider.mongo.get_latest_financial(code)
                     pyramid = self.signal_collector._get_pyramid_strategy()
-                    factor_raw = pyramid.calculate_composite_score(stock_doc, quotes, fin)
+                    market_context = pyramid.load_market_momentum_context()
+                    factor_raw = pyramid.calculate_composite_score_with_group(
+                        stock_doc, quotes, fin, market_context=market_context)
                 row["factor"] = {
                     "composite_score": factor_raw.get("composite_score", 0),
                     "factor_scores": factor_raw.get("factor_scores", {}),
@@ -738,7 +740,7 @@ class PortfolioStrategy:
 
     def analyze_stock(self, code: str, market: str = "A股") -> Dict[str, Any]:
         """分析任意股票（不需在 portfolio.yaml 中）。"""
-        from data_import_pipeline import import_stocks, _load_mongodb_config
+        from data_import_pipeline import import_stocks, _load_mongodb_config, get_or_compute_pe_percentile
         import os
 
         code = str(code).strip()
@@ -858,16 +860,12 @@ class PortfolioStrategy:
                 dv = store.db["stock_dividend"].find_one(
                     {"code": code}, sort=[("trade_date", -1)])
                 if dv:
-                    dividend_yield = dv.get("dv_ttm") or dv.get("dv_ratio")
+                    dividend_yield = next((v for v in (dv.get("dv_ttm"), dv.get("dv_ratio")) if v is not None and v == v), None)
             except Exception:
                 pass
 
-        # PE 自身分位
-        try:
-            sig = store.db["stock_signals"].find_one({"code": code})
-            pe_self = sig.get("pe_percentile") if sig else None
-        except Exception:
-            pe_self = None
+        # PE 自身分位（stock_signals 缓存；缺失则 Tushare daily_basic 现算并回写缓存，港股无源返回 None）
+        pe_self = get_or_compute_pe_percentile(store, code, market)
 
         return {
             "code": code,
@@ -919,7 +917,7 @@ class PortfolioStrategy:
         for asset in assets:
             try:
                 needs = self._data_needs_for_asset(asset)
-                if ensure_data and asset.get("asset_type") == "stock":
+                if ensure_data and asset.get("asset_type") in ("stock", "etf"):
                     result = service.ensure_asset_data(asset, needs=needs, refresh=False)
                     status = result.get("asset", {})
                     status["synced"] = result.get("synced", False)
@@ -1538,19 +1536,23 @@ class PortfolioStrategy:
             return []
 
     def _get_market_breadth(self) -> Dict[str, Any]:
-        """大盘宽度：全市场站上 MA20/MA60 的股票占比。"""
+        """大盘宽度：全市场站上 MA20/MA60 的股票占比。
+
+        数据源是 stock_trends（precompute_history 预计算的趋势状态，字段 trade_date + status）。
+        此前误读 stock_signals（只存资金流/一致预期，无 computed_at/trend.status），导致恒空。
+        """
         try:
-            cutoff = (_utc_now() - __import__("datetime").timedelta(days=2)).strftime("%Y-%m-%d")
-            sigs = list(self.data_provider.mongo.db["stock_signals"].find(
-                {"computed_at": {"$gte": cutoff}},
-                {"code": 1, "trend.status": 1, "_id": 0}
+            cutoff = (datetime.utcnow() - timedelta(days=2)).strftime("%Y-%m-%d")
+            sigs = list(self.data_provider.mongo.db["stock_trends"].find(
+                {"trade_date": {"$gte": cutoff}},
+                {"code": 1, "status": 1, "_id": 0}
             ))
             if len(sigs) < 100:
                 return {"available": False, "reason": "信号缓存不足"}
             above_ma20 = 0
             above_ma60 = 0
             for sig in sigs:
-                status = (sig.get("trend") or {}).get("status", "")
+                status = sig.get("status", "")
                 if status == "趋势较强":
                     above_ma20 += 1
                     above_ma60 += 1
@@ -2338,10 +2340,11 @@ def format_review(report: Dict[str, Any]) -> str:
         peers = row.get("industry_peers", {})
         if peers.get("available"):
             peer_n = peers.get('peer_count', 0)
-            # 自身 PE 历史分位（来自 Tushare）
+            # 自身 PE 历史分位（A股来自 Tushare，港股来自百度股市通）
             pe_self = row.get("pe_percentile_self")
             if pe_self is not None:
-                lines.append(f"│ PE自身分位: {pe_self}% {_percentile_label(pe_self)} (近2年)")
+                window = "全历史" if row.get("market") == "港股" else "近2年"
+                lines.append(f"│ PE自身分位: {pe_self}% {_percentile_label(pe_self)} ({window})")
             if row.get("market") == "港股":
                 lines.append(f"│ 行业参照: 港股暂无")
             elif peer_n < 5:

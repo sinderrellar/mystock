@@ -115,6 +115,7 @@ class PyramidMultifactorStrategy:
         self.ind_blend = self.ind_config.get('blend_ratio', 0.5)
         self.ind_min_peers = self.ind_config.get('min_peers', 5)
         self._industry_stats: Optional[Dict[str, Dict]] = None  # 懒加载缓存
+        self._market_momentum_cache: Optional[Dict[str, Any]] = None  # (trade_date, 四元组) 缓存
 
     def _load_config(self) -> Dict:
         """加载配置文件"""
@@ -267,7 +268,15 @@ class PyramidMultifactorStrategy:
                 pass
         
         # 股息率评分（绝对分 + 行业百分位混合）
-        dividend = stock.get('dividend_yield')
+        # 股息率来自 stock_dividend 集合（basic_info 无此字段，原 stock.get('dividend_yield') 恒为空）
+        dividend = None
+        try:
+            dv = self.data_provider.db["stock_dividend"].find_one(
+                {"code": stock.get("code")}, sort=[("trade_date", -1)])
+            if dv:
+                dividend = next((v for v in (dv.get("dv_ttm"), dv.get("dv_ratio")) if v is not None and v == v), None)
+        except Exception:
+            dividend = None
         if dividend is not None:
             try:
                 if isinstance(dividend, str):
@@ -342,12 +351,16 @@ class PyramidMultifactorStrategy:
         context: Optional[Dict[str, Any]] = None,
         override_weights: Optional[Dict[str, float]] = None,
         override_scoring: Optional[Dict[str, Any]] = None,
+        override_momentum: Optional[float] = None,
+        override_momentum_details: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """计算多因子综合得分。
 
         Args:
             override_weights: 若提供，跳过 config 直接使用这些权重
             override_scoring: 若提供，跳过 config 使用这些评分阶梯（组 config 的 scoring 段）
+            override_momentum: 若提供，直接用该动量分（V2 全市场百分位口径），跳过 K线路径动量
+            override_momentum_details: 配合 override_momentum 的明细（含 available 标记）
         """
         value_score, value_details = self.calculate_value_score(
             stock, quotes, override_scoring=override_scoring)
@@ -355,8 +368,13 @@ class PyramidMultifactorStrategy:
             stock, financial, override_scoring=override_scoring)
         quality_score, quality_details = self.calculate_quality_score(
             stock, financial, override_scoring=override_scoring)
-        momentum_score, momentum_details = self.calculate_momentum_score(
-            quotes, override_scoring=override_scoring)
+        if override_momentum is not None:
+            momentum_score = override_momentum
+            momentum_details = override_momentum_details or {
+                "available": True, "method": "v2_percentile"}
+        else:
+            momentum_score, momentum_details = self.calculate_momentum_score(
+                quotes, override_scoring=override_scoring)
         weights = override_weights or self.get_factor_weights(context)
 
         factor_scores = {
@@ -436,7 +454,7 @@ class PyramidMultifactorStrategy:
             if profit_growth is None:
                 profit_growth = financial.get('netprofit_yoy')
             
-            if revenue_growth is not None:
+            if revenue_growth is not None and revenue_growth == revenue_growth:
                 try:
                     rg = float(revenue_growth)
                     rg_scoring = scoring.get('revenue_growth', {})
@@ -454,7 +472,7 @@ class PyramidMultifactorStrategy:
                 except:
                     pass
             
-            if profit_growth is not None:
+            if profit_growth is not None and profit_growth == profit_growth:
                 try:
                     pg = float(profit_growth)
                     pg_scoring = scoring.get('profit_growth', {})
@@ -478,7 +496,7 @@ class PyramidMultifactorStrategy:
         rev_curr = financial.get('revenue_growth') if financial else None
         prof_curr = financial.get('profit_growth') if financial else None
 
-        if rev_prev is not None and rev_curr is not None:
+        if rev_prev is not None and rev_prev == rev_prev and rev_curr is not None and rev_curr == rev_curr:
             accel = rev_curr - rev_prev
             details['revenue_accel'] = round(accel, 2)
             if accel >= 10:
@@ -492,7 +510,7 @@ class PyramidMultifactorStrategy:
             else:
                 scores['revenue_accel'] = 0.2
 
-        if prof_prev is not None and prof_curr is not None:
+        if prof_prev is not None and prof_prev == prof_prev and prof_curr is not None and prof_curr == prof_curr:
             p_accel = prof_curr - prof_prev
             details['profit_accel'] = round(p_accel, 2)
             if p_accel >= 10:
@@ -506,14 +524,10 @@ class PyramidMultifactorStrategy:
             else:
                 scores['profit_accel'] = 0.2
 
-        # 分析师一致预期增速（优先 financial，fallback stock）
+        # 分析师一致预期增速（来自 financial_data，basic_info 无此字段）
         fc_min = (financial or {}).get('forecast_min')
-        if fc_min is None:
-            fc_min = stock.get('forecast_min')
         fc_max = (financial or {}).get('forecast_max')
-        if fc_max is None:
-            fc_max = stock.get('forecast_max')
-        if fc_min is not None and fc_max is not None:
+        if fc_min is not None and fc_min == fc_min and fc_max is not None and fc_max == fc_max:
             try:
                 fc_avg = (float(fc_min) + float(fc_max)) / 2
                 fc_scoring = scoring.get('forecast_growth', {})
@@ -611,22 +625,49 @@ class PyramidMultifactorStrategy:
         if not self.data_provider:
             return {}
 
-        db = self.data_provider.db[self.data_provider.collections["basic_info"]]
+        store = self.data_provider
+        basic_db = store.db[store.collections["basic_info"]]
         try:
-            cursor = db.find(
+            basics = list(basic_db.find(
                 {"industry_code": {"$ne": None, "$ne": ""},
                  "pe": {"$gt": 0, "$lt": 500},
                  "pb": {"$gt": 0, "$lt": 100}},
-                {"code": 1, "industry_code": 1, "pe": 1, "pb": 1, "roe": 1,
-                 "gross_margin": 1, "dividend_yield": 1, "_id": 0},
-            )
+                {"code": 1, "industry_code": 1, "pe": 1, "pb": 1, "_id": 0},
+            ))
         except Exception:
             return {}
+
+        # ROE / 毛利率 从 financial_data 取最新报告期（basic_info 无这两字段）
+        codes = [d["code"] for d in basics]
+        fin_map: Dict[str, Dict] = {}
+        try:
+            fin_db = store.db[store.collections["financial_data"]]
+            for doc in fin_db.find(
+                {"code": {"$in": codes}, "roe": {"$exists": True}},
+                {"code": 1, "roe": 1, "gross_margin": 1, "_id": 0},
+            ).sort("report_period", -1):
+                if doc["code"] not in fin_map:  # 倒序，首条即最新期
+                    fin_map[doc["code"]] = doc
+        except Exception:
+            fin_map = {}
+
+        # 股息率从 stock_dividend 取（集合可能尚未导入，缺失则为空）
+        dy_map: Dict[str, float] = {}
+        try:
+            div_db = store.db["stock_dividend"]
+            for doc in div_db.find(
+                {"code": {"$in": codes}},
+                {"code": 1, "dv_ttm": 1, "dv_ratio": 1, "_id": 0},
+            ).sort("trade_date", -1):
+                if doc["code"] not in dy_map:
+                    dy_map[doc["code"]] = next((v for v in (doc.get("dv_ttm"), doc.get("dv_ratio")) if v is not None and v == v), None)
+        except Exception:
+            dy_map = {}
 
         groups: Dict[str, Dict[str, list]] = defaultdict(lambda: {
             "pe": [], "pb": [], "roe": [], "gross_margin": [], "dividend_yield": [],
         })
-        for doc in cursor:
+        for doc in basics:
             ic = doc.get("industry_code", "").strip()
             if not ic:
                 continue
@@ -635,12 +676,14 @@ class PyramidMultifactorStrategy:
                 g["pe"].append(float(doc["pe"]))
             if doc.get("pb"):
                 g["pb"].append(float(doc["pb"]))
-            if doc.get("roe"):
-                g["roe"].append(float(doc["roe"]))
-            if doc.get("gross_margin"):
-                g["gross_margin"].append(float(doc["gross_margin"]))
-            if doc.get("dividend_yield") is not None and doc["dividend_yield"] >= 0:
-                g["dividend_yield"].append(float(doc["dividend_yield"]))
+            fin = fin_map.get(doc["code"]) or {}
+            if fin.get("roe"):
+                g["roe"].append(float(fin["roe"]))
+            if fin.get("gross_margin"):
+                g["gross_margin"].append(float(fin["gross_margin"]))
+            dy = dy_map.get(doc["code"])
+            if dy is not None and dy >= 0:
+                g["dividend_yield"].append(float(dy))
 
         stats: Dict[str, Dict] = {}
         for ic, g in groups.items():
@@ -755,11 +798,9 @@ class PyramidMultifactorStrategy:
         scores = {}
         details = {}
 
-        # ROE（越高越好），避免 0 or x 短路
-        roe = stock.get('roe')
-        if roe is None and financial:
-            roe = financial.get('roe')
-        if roe is not None:
+        # ROE（越高越好），从 financial_data 取（basic_info 无 roe 字段）
+        roe = financial.get('roe') if financial else None
+        if roe is not None and roe == roe:
             try:
                 roe = float(roe)
                 roe_scoring = scoring.get('roe', {})
@@ -774,7 +815,7 @@ class PyramidMultifactorStrategy:
 
         # 毛利率（越高越好）
         gross_margin = financial.get('gross_margin') if financial else None
-        if gross_margin is not None:
+        if gross_margin is not None and gross_margin == gross_margin:
             try:
                 gm = float(gross_margin)
                 gm_scoring = scoring.get('gross_margin', {})
@@ -789,7 +830,7 @@ class PyramidMultifactorStrategy:
 
         # 资产负债率（越低越好，不做行业归一化）
         debt_ratio = financial.get('debt_to_assets') if financial else None
-        if debt_ratio is not None:
+        if debt_ratio is not None and debt_ratio == debt_ratio:
             try:
                 dr = float(debt_ratio)
                 dr_scoring = scoring.get('debt_ratio', {})
@@ -800,7 +841,7 @@ class PyramidMultifactorStrategy:
 
         # 经营现金流/净利润（应计质量，越高越好，不做行业归一化）
         ocf_ratio = financial.get('ocf_to_net_income') if financial else None
-        if ocf_ratio is not None:
+        if ocf_ratio is not None and ocf_ratio == ocf_ratio:
             try:
                 ocf = float(ocf_ratio)
                 ocf_scoring = scoring.get('ocf_to_net_income', {})
@@ -1056,6 +1097,127 @@ class PyramidMultifactorStrategy:
             details['missing_reason'] = "缺少足够的 1月/3月行情样本"
 
         return round(avg_score, 3), details
+
+    @staticmethod
+    def calculate_momentum_v2(returns: Dict[str, Any], ma: Dict[str, Any],
+                              ret5_arr: List[float], ret20_arr: List[float],
+                              ret60_arr: List[float]) -> Tuple[float, Dict[str, Any]]:
+        """V2 动量：全市场百分位排名 + MA 多头结构（与 precompute_history 完全一致）。
+
+        供预计算与实时两条路径共用，保证动量口径唯一。
+        """
+        def _pct_rank(val, arr):
+            if not arr:
+                return 0.5
+            return bisect.bisect_left(arr, val) / len(arr)
+
+        returns = returns or {}
+        ma = ma or {}
+        r5 = returns.get("return_5d", 0) or 0
+        r20 = returns.get("return_20d", 0) or 0
+        r60 = returns.get("return_60d", 0) or 0
+        p5 = _pct_rank(r5, ret5_arr)
+        p20 = _pct_rank(r20, ret20_arr)
+        p60 = _pct_rank(r60, ret60_arr)
+        ma_bull = 1 if (ma.get("ma5", 0) or 0) > (ma.get("ma20", 0) or 0) > (ma.get("ma60", 0) or 0) else 0
+        v2 = (0.4 * p60 * 100 + 0.4 * p20 * 100 + 0.2 * p5 * 100 + 5 * ma_bull) / 105
+        return round(v2, 3), {
+            "available": True,
+            "method": "v2_percentile",
+            "return_5d": round(r5, 2),
+            "return_20d": round(r20, 2),
+            "return_60d": round(r60, 2),
+            "pct_5d": round(p5, 3),
+            "pct_20d": round(p20, 3),
+            "pct_60d": round(p60, 3),
+            "ma_bull": ma_bull,
+        }
+
+    def load_market_momentum_context(self, trade_date: Optional[str] = None
+                                     ) -> Tuple[List[float], List[float], List[float], Dict[str, Dict[str, Any]]]:
+        """加载全市场 stock_trends 的收益分布，供 V2 动量百分位排名使用。
+
+        返回 (ret5_arr, ret20_arr, ret60_arr, trend_by_code)。
+        trade_date 为空时取 stock_trends 最新日期。按 trade_date 缓存，避免 review 多只持仓时重复全表扫描。
+        """
+        try:
+            db = self.data_provider.db
+            query: Dict[str, Any] = {"available": True}
+            if not trade_date:
+                latest = db["stock_trends"].find_one(
+                    {"available": True}, sort=[("trade_date", -1)])
+                if not latest:
+                    return [], [], [], {}
+                trade_date = latest.get("trade_date")
+            else:
+                query["trade_date"] = trade_date
+
+            if self._market_momentum_cache and self._market_momentum_cache.get("trade_date") == trade_date:
+                return self._market_momentum_cache["context"]
+
+            query["trade_date"] = trade_date
+            trend_by_code: Dict[str, Dict[str, Any]] = {}
+            ret5_all: List[float] = []
+            ret20_all: List[float] = []
+            ret60_all: List[float] = []
+            for tdoc in db["stock_trends"].find(
+                query, {"code": 1, "returns": 1, "ma": 1, "trade_date": 1}
+            ):
+                code = tdoc.get("code")
+                if not code:
+                    continue
+                trend_by_code[code] = tdoc
+                rets = tdoc.get("returns", {}) or {}
+                ret5_all.append(rets.get("return_5d", 0) or 0)
+                ret20_all.append(rets.get("return_20d", 0) or 0)
+                ret60_all.append(rets.get("return_60d", 0) or 0)
+            context = (sorted(ret5_all), sorted(ret20_all), sorted(ret60_all), trend_by_code)
+            self._market_momentum_cache = {"trade_date": trade_date, "context": context}
+            return context
+        except Exception:
+            return [], [], [], {}
+
+    def calculate_composite_score_with_group(
+        self,
+        stock: Dict,
+        quotes: List[Dict],
+        financial: Optional[Dict],
+        market_context: Optional[Tuple[List[float], List[float], List[float], Dict[str, Dict[str, Any]]]] = None,
+    ) -> Dict[str, Any]:
+        """按业务组口径计算综合分：组权重 + 组打分 + V2 动量，实时/预计算共用。
+
+        这是因子口径的唯一权威入口。实时路径（strategy_signals）与预计算路径
+        （precompute_history）都应走这里，保证同一标的不再出现两套分数。
+        """
+        from business_group_loader import BusinessGroupLoader
+
+        loader = BusinessGroupLoader()
+        industry = str((stock or {}).get("industry") or "")
+        group = loader.get_group(industry)
+        weights = loader.get_weights(group) or None
+        scoring = loader.get_scoring(group) or None
+
+        # V2 动量（全市场百分位口径）
+        override_momentum = None
+        override_momentum_details = None
+        if market_context is not None:
+            ret5_arr, ret20_arr, ret60_arr, trend_by_code = market_context
+            code = str((stock or {}).get("code") or "")
+            tdoc = trend_by_code.get(code) or {}
+            if tdoc.get("returns") is not None or tdoc.get("ma") is not None:
+                override_momentum, override_momentum_details = self.calculate_momentum_v2(
+                    tdoc.get("returns", {}) or {}, tdoc.get("ma", {}) or {},
+                    ret5_arr, ret20_arr, ret60_arr,
+                )
+
+        return self.calculate_composite_score(
+            stock, quotes, financial,
+            context={"industry": industry, "market": (stock or {}).get("market", "")},
+            override_weights=weights,
+            override_scoring=scoring,
+            override_momentum=override_momentum,
+            override_momentum_details=override_momentum_details,
+        )
 
     @staticmethod
     def _score_reversal(ret_5d: float) -> float:

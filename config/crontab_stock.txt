@@ -40,3 +40,14 @@ PATH=/data2/liuyu20/mystock/venv/bin:/usr/bin:/bin
 55 14 * * 1-5 cd /data2/liuyu20/mystock/scripts && /data2/liuyu20/mystock/venv/bin/python data_import_pipeline.py import-hsgt-flow >> ../logs/import.log 2>&1
 # 每个交易日 21:00 — 信号预计算（依赖 19:00 universe-quotes 导完当天日线）
 0 21 * * 1-5 cd /data2/liuyu20/mystock/scripts && /data2/liuyu20/mystock/venv/bin/python precompute_history.py --date today --workers 8 >> ../logs/precompute.log 2>&1
+
+# 每个交易日盘中 — 持仓情绪预计算（新闻 + wecode 解析，半小时分桶缓存预热组合全景）
+# 时段：盘前半小时(9:00) + 早盘3次(9:45/10:30/11:15) + 下午盘前(12:30) + 下午盘中3次(13:15/14:00/14:45)
+0 9 * * 1-5 cd /data2/liuyu20/mystock/scripts && /data2/liuyu20/mystock/venv/bin/python sentiment_precompute.py >> ../logs/sentiment_precompute.log 2>&1
+45 9 * * 1-5 cd /data2/liuyu20/mystock/scripts && /data2/liuyu20/mystock/venv/bin/python sentiment_precompute.py >> ../logs/sentiment_precompute.log 2>&1
+30 10 * * 1-5 cd /data2/liuyu20/mystock/scripts && /data2/liuyu20/mystock/venv/bin/python sentiment_precompute.py >> ../logs/sentiment_precompute.log 2>&1
+15 11 * * 1-5 cd /data2/liuyu20/mystock/scripts && /data2/liuyu20/mystock/venv/bin/python sentiment_precompute.py >> ../logs/sentiment_precompute.log 2>&1
+30 12 * * 1-5 cd /data2/liuyu20/mystock/scripts && /data2/liuyu20/mystock/venv/bin/python sentiment_precompute.py >> ../logs/sentiment_precompute.log 2>&1
+15 13 * * 1-5 cd /data2/liuyu20/mystock/scripts && /data2/liuyu20/mystock/venv/bin/python sentiment_precompute.py >> ../logs/sentiment_precompute.log 2>&1
+0 14 * * 1-5 cd /data2/liuyu20/mystock/scripts && /data2/liuyu20/mystock/venv/bin/python sentiment_precompute.py >> ../logs/sentiment_precompute.log 2>&1
+45 14 * * 1-5 cd /data2/liuyu20/mystock/scripts && /data2/liuyu20/mystock/venv/bin/python sentiment_precompute.py >> ../logs/sentiment_precompute.log 2>&1

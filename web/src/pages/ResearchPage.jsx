@@ -407,17 +407,28 @@ function LibraryPanel() {
 }
 
 /* ── 投资助手（多轮对话 + 话题列表 + 证据底座 + 后台研究任务） ── */
+const CAPABILITY_CHIPS = [
+  { label: '查账户', text: '帮我查一下账户' },
+  { label: '买股票', text: '帮我买入 300750 100 股' },
+  { label: '卖股票', text: '帮我卖出 300750 100 股' },
+  { label: '设止损', text: '给 300750 设止损价 40' },
+  { label: '加观察池', text: '把 300750 加入观察池' },
+  { label: '跑复盘', text: '帮我跑一下组合复盘' },
+]
+
 function ChatPanel() {
   const [sessions, setSessions] = useState([])
   const [currentId, setCurrentId] = useState(null)
   const [session, setSession] = useState(null) // 当前会话全文（含 messages）
   const [input, setInput] = useState('')
   const [mode, setMode] = useState('normal') // 普通分析 / 深度分析（多智能体）
-  const [web, setWeb] = useState(true) // 深度分析时是否允许子代理联网
+  const [web, setWeb] = useState(false) // 深度分析时是否允许子代理联网（默认关：用数据底座，更快更省）
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState(null)
   const [pollTaskId, setPollTaskId] = useState(null)
+  const [processSid, setProcessSid] = useState(null) // 查看某条回复的研究过程（wecode session_id）
   const flowRef = useRef(null)
+  const inputRef = useRef(null)
 
   const loadSessions = useCallback(() => {
     getDebateSessions()
@@ -544,7 +555,7 @@ function ChatPanel() {
           {session?.code && <span className="tag blue">{session.code}</span>}
           {session?.code && (
             <span className="muted" style={{ fontSize: 12 }}>
-              证据：{reportCount} 份报告{hasData ? ' + 定量数据' : ''}
+              证据：{reportCount} 份报告{hasData ? ' + 定量数据' : ''}{ev.built_at ? ` · 截至 ${ev.built_at.replace('T', ' ').slice(5, 16)}` : ''}
             </span>
           )}
         </div>
@@ -554,7 +565,10 @@ function ChatPanel() {
             <div className="empty">
               向「投资助手」提问，例如：<br />
               「我的宁德时代持仓还能拿吗？」「半导体行业为什么这么弱？」<br />
-              （会自动识别问题里的股票/行业，并带上相关研究报告 + 定量数据作证据）
+              （会自动识别问题里的股票/行业，并带上相关研究报告 + 定量数据作证据）<br />
+              <span style={{ color: 'var(--text-dim)' }}>
+                还能替你操作模拟盘：下单/卖出、设止损止盈、加/移观察池、跑复盘（见下方「我可以」）
+              </span>
             </div>
           ) : (
             messages.map((m, i) => (
@@ -564,6 +578,11 @@ function ChatPanel() {
                     <div className="tag blue" style={{ display: 'inline-block', marginBottom: 6 }}>🧠 深度分析</div>
                   )}
                   {m.role === 'assistant' ? <MarkdownView content={m.content} /> : m.content}
+                  {m.role === 'assistant' && m.meta?.session_id && (
+                    <div style={{ marginTop: 8, borderTop: '1px solid var(--border)', paddingTop: 6 }}>
+                      <button className="btn sm ghost" onClick={() => setProcessSid(m.meta.session_id)}>📋 研究过程记录</button>
+                    </div>
+                  )}
                 </div>
               </div>
             ))
@@ -575,6 +594,21 @@ function ChatPanel() {
               </div>
             </div>
           )}
+        </div>
+
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', margin: '4px 0 8px' }}>
+          <span className="muted" style={{ fontSize: 12 }}>我可以：</span>
+          {CAPABILITY_CHIPS.map((c) => (
+            <button
+              key={c.label}
+              className="chip"
+              disabled={busy}
+              onClick={() => { setInput(c.text); inputRef.current?.focus() }}
+              title={`填入指令：${c.text}`}
+            >
+              {c.label}
+            </button>
+          ))}
         </div>
 
         <div className="chat-input-bar">
@@ -599,6 +633,7 @@ function ChatPanel() {
             className="chat-input"
             placeholder="输入你的疑问，回车发送…"
             value={input}
+            ref={inputRef}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={(e) => {
               if (e.key === 'Enter' && !e.shiftKey) {
@@ -614,6 +649,21 @@ function ChatPanel() {
         </div>
         {error && <div className="error" style={{ margin: '8px 0 0' }}>{error}</div>}
       </div>
+
+      {/* 研究过程记录弹窗（复用研究库的 ProcessPane） */}
+      {processSid && (
+        <div className="process-modal" onClick={() => setProcessSid(null)}>
+          <div className="process-modal-box" onClick={(e) => e.stopPropagation()}>
+            <div className="process-modal-head">
+              <b>研究过程记录</b>
+              <button className="btn sm ghost" onClick={() => setProcessSid(null)}>✕ 关闭</button>
+            </div>
+            <div className="process-modal-body">
+              <ProcessPane sessionId={processSid} />
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

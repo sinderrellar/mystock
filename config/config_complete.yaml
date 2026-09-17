@@ -94,6 +94,23 @@ pyramid_middle_layer:
     strong_breadth: 60        # 站上 MA20 股票占比 > 60% = 强势
     weak_breadth: 35          # 站上 MA20 股票占比 < 35% = 弱势
     weak_min_cycle: 0.50      # 弱势下抄底保护：cycle 必须 > 0.50
+    regime_confirm_days: 3    # 防抖：新档位连续维持 N 个交易日才真正切换（历史回测不防抖）
+    # 阈值套件：不同市场状态对应不同 Layer0 选股口径（金额单位=元，与 stock_pool 一致）
+    # 弱势缺少股息率/ROE 字段（basic_info 无），防守用 pe_max+市值+cycle 三重实现
+    thresholds:
+      strong:                 # 强势：进攻，放宽估值追成长、流动性优先
+        pe_max: 80
+        min_market_cap: 3000000000     # 30亿（放中小盘成长弹性）
+        min_amount: 100000000          # 1亿（买流动性）
+      neutral:                # 震荡：平衡，业绩+估值性价比
+        pe_max: 50
+        min_market_cap: 5000000000     # 50亿
+        min_amount: 50000000           # 5000万
+      weak:                   # 弱势：防守，只买便宜+龙头+高ROE，配合 cycle>0.5
+        pe_max: 30
+        min_market_cap: 20000000000    # 200亿（只买大盘龙头）
+        min_amount: 50000000           # 5000万
+        roe_min: 10                    # 净资产收益率≥10%（质量防守门槛，读 stock_financial_data）
     alpha_weights:
       strong:                 # 强势：动量优先，追涨
         momentum: 0.55

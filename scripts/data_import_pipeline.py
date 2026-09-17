@@ -185,6 +185,53 @@ def import_stocks(codes: List[str], store: MongoFactorDataStore,
 # 全市场日线预导入 — 供 buy_plan 等策略直接查询
 # ============================================================
 
+def import_latest_amount(store: MongoFactorDataStore) -> Dict[str, Any]:
+    """刷新全市场 A 股成交额到 basic_info.latest_amount（万元），供选可投池排序用。
+
+    背景：latest_amount 原只在周日 import-universe-light 更新，工作日会 stale，
+    导致 import-universe-quotes 用陈旧成交额选可投池（曾致可投池缩水）。此函数在
+    每个交易日盘后用 Sina 全市场 spot（一次调用拿全市场）刷新，只 $set latest_amount
+    + updated_at，不碰 name/industry/close 等字段，避免每天重写基础信息的副作用。
+
+    单位：Sina spot「成交额」列是元，全系统约定 latest_amount 用万元，故 /1e4。
+    幂等：$set 覆盖，可重跑；只更新已有股票，不新增（新增是 import-universe-light 的职责）。
+    """
+    import re
+    import akshare as ak
+
+    print("刷新全市场成交额 (Sina spot)...")
+    try:
+        df = ak.stock_zh_a_spot()
+    except Exception as e:
+        return {"ok": False, "error": f"获取 Sina 全市场行情失败: {e}"}
+    if df is None or df.empty:
+        return {"ok": False, "error": "Sina 全市场行情返回空"}
+
+    basic = store.db[store.collections["basic_info"]]
+    now = datetime.now(timezone.utc)
+    updated = 0
+    skipped = 0
+    for _, row in df.iterrows():
+        raw_code = str(row.get("代码", ""))
+        digits = "".join(re.findall(r"\d", raw_code))
+        code = digits[-6:] if len(digits) >= 6 else digits.zfill(6)
+        if not code or code == "000000":
+            skipped += 1
+            continue
+        amount_yuan = _safe_float(row.get("成交额"), None)
+        if amount_yuan is None:
+            skipped += 1
+            continue
+        basic.update_one(
+            {"code": code},
+            {"$set": {"latest_amount": amount_yuan / 1e4, "updated_at": now}},
+        )
+        updated += 1
+
+    print(f"  成交额刷新: {updated} 只, 跳过 {skipped} 只")
+    return {"ok": True, "updated": updated, "skipped": skipped}
+
+
 def import_universe_quotes(store: MongoFactorDataStore, limit: int = 800) -> Dict[str, Any]:
     """预导入大盘股的日线数据（市值排序前 N 只），供 buy_plan 直接查询。
 
@@ -192,6 +239,11 @@ def import_universe_quotes(store: MongoFactorDataStore, limit: int = 800) -> Dic
     批量补齐日线。跳过已有最近 2 天内日线的股票。
     """
     from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+
+    # 先刷新全市场成交额（供选可投池用），失败降级沿用旧值、不阻塞日线导入
+    amt = import_latest_amount(store)
+    if not amt.get("ok"):
+        print(f"  ⚠️ 刷新成交额失败，沿用旧值: {amt.get('error')}")
 
     print(f"获取已入库的 A 股列表...")
 
@@ -316,7 +368,7 @@ def import_stock_moneyflow(store: MongoFactorDataStore, limit: int = 3000,
     stocks = list(coll.find(
         {"display_market": "A股", "market": {"$in": ["主板", "创业板", "科创板"]},
          "latest_amount": {"$gte": 5_000}, "total_mv": {"$gte": 5_000_000_000},
-         "pe": {"$gt": 0, "$lt": 50}},
+         "pe": {"$gt": 0}},
         {"code": 1, "name": 1, "_id": 0},
     ).sort("latest_amount", -1).limit(limit))
 
@@ -364,7 +416,7 @@ def import_stock_forecast(store: MongoFactorDataStore, limit: int = 3000,
     stocks = list(coll.find(
         {"display_market": "A股", "market": {"$in": ["主板", "创业板", "科创板"]},
          "latest_amount": {"$gte": 5_000}, "total_mv": {"$gte": 5_000_000_000},
-         "pe": {"$gt": 0, "$lt": 50}},
+         "pe": {"$gt": 0}},
         {"code": 1, "name": 1, "_id": 0},
     ).sort("latest_amount", -1).limit(limit))
 
@@ -471,80 +523,180 @@ def _get_pe_percentile(pro, code: str) -> Optional[float]:
         return None
 
 
+def _get_hk_pe_percentile(code: str) -> Optional[float]:
+    """港股自身历史 PE 分位：akshare 百度股市通 历史市盈率(TTM) 序列算当前分位。
+
+    数据源 stock_hk_valuation_baidu(symbol, '市盈率(TTM)', '全部')，覆盖 2004 年至今
+    （约 600-800 个估值采样点，非日频）。当前 PE <= 0（亏损）时分位无意义，返回 None。
+    """
+    try:
+        import akshare as ak
+        df = ak.stock_hk_valuation_baidu(symbol=code, indicator="市盈率(TTM)", period="全部")
+        if df is None or df.empty:
+            return None
+        vals = df["value"].dropna()
+        if len(vals) < 30:
+            return None
+        current = vals.iloc[-1]
+        if current is None or current <= 0:
+            return None  # 亏损股 PE 无意义
+        pct = (vals <= current).sum() / len(vals) * 100
+        return round(pct, 1)
+    except Exception:
+        return None
+
+
+def get_or_compute_pe_percentile(store: MongoFactorDataStore, code: str,
+                                 market: str = "A股") -> Optional[float]:
+    """自身历史 PE 分位：优先 stock_signals 缓存，缺失则现算并缓存。
+
+    - A股：Tushare daily_basic（近2年窗口）。
+    - 港股：akshare 百度股市通 历史市盈率(TTM)（2004 年至今全历史）。
+    - 美股：无源，返回 None。
+    cache-first：analyze_stock（投资助手/辩论每次取数）命中缓存后零成本，
+    只有首次查询才打一次数据源，结果回写 stock_signals.pe_percentile。
+    """
+    code = str(code).strip()
+    if market not in ("A股", "港股"):
+        return None
+    try:
+        doc = store.db["stock_signals"].find_one({"code": code})
+        if doc and doc.get("pe_percentile") is not None:
+            return doc["pe_percentile"]
+        if market == "港股":
+            pct = _get_hk_pe_percentile(code)
+        else:
+            pro = _get_tushare_pro()
+            if not pro:
+                return None
+            pct = _get_pe_percentile(pro, code)
+        if pct is None:
+            return None
+        store.db["stock_signals"].update_one(
+            {"code": code},
+            {"$set": {"pe_percentile": pct}},
+            upsert=True,
+        )
+        return pct
+    except Exception:
+        return None
+
+
+# ================================================================
+# 自身历史 PE 分位（批量） — Tushare daily_basic 入 stock_signals.pe_percentile
+# ================================================================
+
+def import_pe_percentile(store: MongoFactorDataStore, limit: int = 6000,
+                         sleep_ms: int = 400) -> Dict[str, Any]:
+    """批量计算 A 股自身历史 PE 分位，写入 stock_signals.pe_percentile。
+
+    覆盖全信号宇宙（主板/创业板/科创板，与 precompute_history 的 6/0/3 开头一致，
+    约 5200 只；北交所无趋势信号、无需 PE 分位）。不做成交额/市值/PE 过滤——
+    亏损股 daily_basic 无 pe_ttm，_get_pe_percentile 自然返回 None。
+    每只打一次 Tushare daily_basic，复用 _get_pe_percentile 算分位，结果回写缓存。
+    已有缓存（pe_percentile 非空）的跳过，避免重复打 API。
+    """
+    ts_pro = _get_tushare_pro()
+    if not ts_pro:
+        return {"ok": False, "error": "Tushare 不可用"}
+
+    coll = store.db[store.collections["basic_info"]]
+    stocks = list(coll.find(
+        {"display_market": "A股", "market": {"$in": ["主板", "创业板", "科创板"]}},
+        {"code": 1, "name": 1, "_id": 0},
+    ).sort("total_mv", -1).limit(limit))
+
+    imported = 0
+    skipped = 0
+    errors = 0
+
+    for i, s in enumerate(stocks):
+        code = s["code"]
+        try:
+            doc = store.db["stock_signals"].find_one({"code": code})
+            if doc and doc.get("pe_percentile") is not None:
+                skipped += 1
+                continue
+            pct = _get_pe_percentile(ts_pro, code)
+            if pct is None:
+                errors += 1
+                continue
+            store.db["stock_signals"].update_one(
+                {"code": code},
+                {"$set": {"pe_percentile": pct}},
+                upsert=True,
+            )
+            imported += 1
+        except Exception:
+            errors += 1
+
+        if (i + 1) % 200 == 0:
+            print(f"  PE分位: {i+1}/{len(stocks)} (新增 {imported}, 已有缓存 {skipped}, 失败 {errors})")
+        time.sleep(sleep_ms / 1000.0)
+
+    print(f"PE分位完成: 新增 {imported}, 已有缓存 {skipped}, 失败 {errors}")
+    return {"ok": True, "imported": imported, "skipped": skipped, "errors": errors}
+
+
 # ================================================================
 # 股息率 — Tushare daily_basic 入 MongoDB（仅A股）
 # ================================================================
 
 def import_dividend_yield(store: MongoFactorDataStore, portfolio_path: str) -> Dict[str, Any]:
-    """拉取组合中所有A股的股息率(dv_ttm/dv_ratio)，存入 stock_dividend 集合。"""
-    import requests
+    """全市场股息率(dv_ttm/dv_ratio)批量导入 stock_dividend 集合。
 
-    config_path = os.path.join(PROJECT_ROOT, "config", "config_complete.yaml")
-    with open(config_path) as f:
-        cfg = yaml.safe_load(f)
-    token = ((cfg.get("data_sources") or {}).get("tushare") or {}).get("token", "")
-    if not token:
-        return {"ok": False, "error": "Tushare token 未配置"}
-
-    with open(portfolio_path) as f:
-        pf = yaml.safe_load(f)
-    a_codes: List[str] = []
-    for pos in pf.get("positions", []) or []:
-        if pos.get("market") == "A股" and pos.get("asset_type") == "stock":
-            a_codes.append(pos["code"])
-    for wl in pf.get("watchlist", []) or []:
-        if wl.get("market") == "A股":
-            a_codes.append(wl["code"])
-    if not a_codes:
-        return {"ok": True, "message": "无A股持仓/观察，跳过"}
+    用 tushare daily_basic 按交易日批量拉全市场（单次调用约 5500 只），
+    替代原先仅覆盖组合持仓的逐只调用。覆盖最近 5 个交易日。
+    """
+    pro = _get_tushare_pro()
+    if not pro:
+        return {"ok": False, "error": "Tushare 不可用"}
 
     end_date = datetime.now().strftime("%Y%m%d")
-    start_date = (datetime.now() - timedelta(days=90)).strftime("%Y%m%d")
-    results: Dict[str, Any] = {}
-    for code in a_codes:
-        ts_code = f"{code}.SH" if code.startswith(("5", "6", "9")) else f"{code}.SZ"
+    start_date = (datetime.now() - timedelta(days=15)).strftime("%Y%m%d")
+    trade_dates: List[str] = []
+    try:
+        cal = pro.trade_cal(exchange="SSE", start_date=start_date, end_date=end_date, is_open="1")
+        if cal is not None and not cal.empty:
+            trade_dates = sorted(cal["cal_date"].tolist(), reverse=True)[:5]
+    except Exception:
+        trade_dates = []
+    if not trade_dates:
+        trade_dates = [end_date]
+
+    imported = 0
+    for td in trade_dates:
         try:
-            resp = requests.post(
-                "https://api.tushare.pro",
-                json={
-                    "api_name": "daily_basic",
-                    "token": token,
-                    "params": {"ts_code": ts_code, "start_date": start_date, "end_date": end_date},
-                    "fields": "ts_code,trade_date,dv_ratio,dv_ttm",
-                },
-                timeout=15,
-            )
-            data = resp.json()
-            if data.get("code") != 0:
-                results[code] = f"API错误: {data.get('msg')}"
+            df = pro.daily_basic(trade_date=td, fields="ts_code,trade_date,dv_ratio,dv_ttm")
+            if df is None or df.empty:
                 continue
-            items = data["data"]["items"]
-            count = 0
-            for item in items:
-                doc = {
-                    "code": code,
-                    "ts_code": item[0],
-                    "trade_date": item[1],
-                    "dv_ratio": float(item[2]) if item[2] else None,
-                    "dv_ttm": float(item[3]) if item[3] else None,
-                    "source": "tushare_daily_basic",
-                    "updated_at": datetime.now(),
-                }
+            for _, r in df.iterrows():
+                code = str(r["ts_code"]).split(".")[0]
+                dv_ttm = _safe_float(r.get("dv_ttm"), None)
+                dv_ratio = _safe_float(r.get("dv_ratio"), None)
+                if dv_ttm is None and dv_ratio is None:
+                    continue
                 store.db["stock_dividend"].update_one(
-                    {"code": code, "trade_date": item[1]},
-                    {"$set": doc},
+                    {"code": code, "trade_date": str(r["trade_date"])},
+                    {"$set": {
+                        "code": code,
+                        "ts_code": str(r["ts_code"]),
+                        "trade_date": str(r["trade_date"]),
+                        "dv_ratio": dv_ratio,
+                        "dv_ttm": dv_ttm,
+                        "source": "tushare_daily_basic",
+                        "updated_at": datetime.now(),
+                    }},
                     upsert=True,
                 )
-                count += 1
-            results[code] = f"写入{count}条"
+                imported += 1
         except Exception as e:
-            results[code] = str(e)
-        time.sleep(0.3)
+            print(f"  daily_basic {td} 失败: {e}")
 
     # 索引
     store.db["stock_dividend"].create_index(
         [("code", ASCENDING), ("trade_date", ASCENDING)], unique=True, background=True)
-    return {"ok": True, "results": results}
+    return {"ok": True, "imported": imported, "trade_dates": trade_dates}
 
 
 # ================================================================
@@ -1165,7 +1317,8 @@ def _safe_float(value: Any, default: Optional[float] = None) -> Optional[float]:
     try:
         if isinstance(value, str):
             value = value.replace(",", "").replace("%", "").strip()
-        return float(value)
+        result = float(value)
+        return default if result != result else result  # NaN → default
     except (TypeError, ValueError):
         return default
 
@@ -1173,6 +1326,84 @@ def _safe_float(value: Any, default: Optional[float] = None) -> Optional[float]:
 # ============================================================
 # 全市场重基础信息导入（PE/PB/市值 — 走 AKShare Spot，不稳定）
 # ============================================================
+
+# ============================================================
+# 换手率回填 — Tushare daily_basic 入 stock_basic_info（仅A股）
+# ============================================================
+
+def import_turnover_rate(store: MongoFactorDataStore) -> Dict[str, Any]:
+    """用 Tushare daily_basic 回填全市场 A 股换手率到 stock_basic_info。
+
+    回填原因：import_universe_light 用的 Sina spot 接口（ak.stock_zh_a_spot）返回的
+    列里没有「换手率」，导致 stock_basic_info.turnover_rate 全为 None，sector_radar 动量分
+    的换手维度（15% 权重）失效。daily_basic 按 trade_date 单次拉全市场（约 5500 只）。
+    """
+    import math
+    import requests
+
+    config_path = os.path.join(PROJECT_ROOT, "config", "config_complete.yaml")
+    with open(config_path) as f:
+        cfg = yaml.safe_load(f)
+    token = ((cfg.get("data_sources") or {}).get("tushare") or {}).get("token", "")
+    if not token:
+        return {"ok": False, "error": "Tushare token 未配置"}
+
+    def _opt_float(v):
+        try:
+            if v is None or v == "":
+                return None
+            f = float(v)
+            return None if math.isnan(f) else f
+        except (TypeError, ValueError):
+            return None
+
+    # 找最近有数据的交易日（daily_basic T+1 发布，当天盘中可能未出全，回退最多 6 天）
+    fields = "ts_code,trade_date,turnover_rate,turnover_rate_f,volume_ratio"
+    used_date = None
+    rows: List[Any] = []
+    for offset in range(0, 6):
+        d = (datetime.now() - timedelta(days=offset)).strftime("%Y%m%d")
+        try:
+            resp = requests.post(
+                "https://api.tushare.pro",
+                json={"api_name": "daily_basic", "token": token,
+                      "params": {"trade_date": d}, "fields": fields},
+                timeout=20,
+            )
+            data = resp.json()
+            if data.get("code") != 0:
+                continue
+            items = data["data"]["items"]
+            if items:
+                used_date = d
+                rows = items
+                break
+        except Exception as e:
+            print(f"  daily_basic {d} 拉取失败: {e}")
+
+    if not rows:
+        return {"ok": False, "error": "daily_basic 近6日无数据"}
+
+    basic_coll = store.db[store.collections["basic_info"]]
+    updated = 0
+    for item in rows:
+        code = str(item[0]).split(".")[0]
+        if not code:
+            continue
+        r = basic_coll.update_one(
+            {"code": code},
+            {"$set": {
+                "turnover_rate": _opt_float(item[2]),
+                "turnover_rate_f": _opt_float(item[3]),
+                "volume_ratio": _opt_float(item[4]),
+                "turnover_date": used_date,
+            }},
+        )
+        if r.matched_count:
+            updated += 1
+
+    return {"ok": True, "updated": updated, "trade_date": used_date}
+
 
 # ============================================================
 # 全量导入
@@ -1382,37 +1613,43 @@ def import_all(config_path: str, portfolio_path: str) -> Dict[str, Any]:
 
     # 1. A股全市场代码+名称（轻量）
     print("\n" + "=" * 60)
-    print("1/5 全市场 A股 基础信息（轻量）")
+    print("1/7 全市场 A股 基础信息（轻量）")
     print("=" * 60)
     results["universe_light"] = import_universe_light(store)
 
-    # 2. 持仓+观察池 K线+财务
+    # 2. 换手率回填（Sina 源无换手率，用 Tushare daily_basic 补）
     print("\n" + "=" * 60)
-    print("2/5 持仓+观察池 K线 & 财务")
+    print("2/7 全市场 A股 换手率回填")
+    print("=" * 60)
+    results["turnover_rate"] = import_turnover_rate(store)
+
+    # 3. 持仓+观察池 K线+财务
+    print("\n" + "=" * 60)
+    print("3/7 持仓+观察池 K线 & 财务")
     print("=" * 60)
     results["portfolio"] = import_portfolio(portfolio_path, store)
 
-    # 3. 港股南向持仓
+    # 4. 港股南向持仓
     print("\n" + "=" * 60)
-    print("3/5 港股南向持仓")
+    print("4/7 港股南向持仓")
     print("=" * 60)
     results["hk_southbound"] = import_hk_southbound(store, portfolio_path)
 
-    # 4. A股股息率
+    # 5. A股股息率
     print("\n" + "=" * 60)
-    print("4/5 A股股息率")
+    print("5/7 A股股息率")
     print("=" * 60)
     results["dividend_yield"] = import_dividend_yield(store, portfolio_path)
 
-    # 5. 行业资金流向
+    # 6. 行业资金流向
     print("\n" + "=" * 60)
-    print("5/6 行业资金流向")
+    print("6/7 行业资金流向")
     print("=" * 60)
     results["industry_moneyflow"] = import_industry_moneyflow(store)
 
-    # 6. 北向南向净买额（东方财富，需在收盘前运行才能拿到北向数据）
+    # 7. 北向南向净买额（东方财富，需在收盘前运行才能拿到北向数据）
     print("\n" + "=" * 60)
-    print("6/6 沪深港通净买额")
+    print("7/7 沪深港通净买额")
     print("=" * 60)
     results["hsgt_flow"] = import_hsgt_flow(store)
 
@@ -1519,7 +1756,9 @@ def main() -> None:
         "import-hk-southbound", "import-dividend-yield", "repair-pe",
         "import-industry-moneyflow", "import-market-moneyflow", "import-macro-news",
         "import-top-list", "import-stock-moneyflow", "import-stock-forecast",
+        "import-pe-percentile",
         "import-hsgt-flow", "import-sentiment", "import-all", "data-check",
+        "import-turnover-rate", "import-latest-amount",
     ])
     parser.add_argument("--codes", default="", help="股票代码，逗号分隔（import-stocks 使用）")
     parser.add_argument("--config", default=os.path.join(PROJECT_ROOT, "config", "config_complete.yaml"))
@@ -1544,6 +1783,14 @@ def main() -> None:
 
     elif args.command == "import-universe-light":
         import_universe_light(store)
+
+    elif args.command == "import-turnover-rate":
+        result = import_turnover_rate(store)
+        print(result)
+
+    elif args.command == "import-latest-amount":
+        result = import_latest_amount(store)
+        print(result)
 
     elif args.command == "import-universe-quotes":
         import_universe_quotes(store, limit=args.quote_limit or 800)
@@ -1591,6 +1838,11 @@ def main() -> None:
     elif args.command == "import-stock-forecast":
         limit = args.quote_limit if args.quote_limit != 180 else 3000
         result = import_stock_forecast(store, limit=limit)
+        print(result)
+
+    elif args.command == "import-pe-percentile":
+        limit = args.quote_limit if args.quote_limit != 180 else 6000
+        result = import_pe_percentile(store, limit=limit, sleep_ms=int(args.sleep * 1000))
         print(result)
 
     elif args.command == "import-hsgt-flow":

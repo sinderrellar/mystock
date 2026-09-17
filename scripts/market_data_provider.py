@@ -54,6 +54,17 @@ def _utc_now() -> datetime:
 # 市场情绪日级缓存：情绪基于日线（盘中不变），跨 review 复用，避免每次拉指数/资金流
 _MARKET_SENTIMENT_CACHE: Dict[str, Dict[str, Any]] = {}
 
+# 指数现价短缓存：symbol -> (ts, price)，TTL 60s。现价盘中随时变，不能按日冻结，
+# 否则盘前算一次就把昨收存整天，出现「上证指数还是 3932」这种陈旧值。
+_INDEX_QUOTE_CACHE: Dict[str, Tuple[float, float]] = {}
+
+# 市场情绪面板的指数 symbol 映射（名称 -> 腾讯 symbol）
+_INDEX_SYMBOLS = {
+    "上证指数": "sh000001",
+    "创业板指": "sz399006",
+    "沪深300": "sh000300",
+}
+
 
 def _parse_date(value: Optional[str]) -> Optional[datetime]:
     """解析多种日期格式：ISO8601 / YYYYMMDD / YYYY-MM-DD。"""
@@ -484,6 +495,14 @@ class MarketDataProvider:
         if mongo_result.get("available") and not mongo_result.get("stale"):
             return mongo_result
 
+        # 港股：腾讯行情兜底（Mongo 无港股 basic；akshare HK spot 连接不稳、yahoo 403）
+        if market == "港股":
+            tencent_result = self._quote_from_tencent_hk(code)
+            if tencent_result.get("available"):
+                tencent_result["data_date"] = now_iso
+                tencent_result["stale"] = False
+                return tencent_result
+
         # 2. AKShare spot — 实时补齐
         akshare_result = self._quote_from_akshare(code, market)
         if akshare_result.get("available"):
@@ -546,6 +565,17 @@ class MarketDataProvider:
         result = {"available": True, "source": "yahoo", "symbol": metrics["symbol"], "metrics": metrics}
         self._yahoo_quote_cache[symbol] = result
         return result
+
+    def _get_dividend_yield_from_db(self, code: str) -> Optional[float]:
+        """从 stock_dividend 集合读股息率（dv_ttm 优先，dv_ratio 兜底）。"""
+        try:
+            dv = self.mongo.db["stock_dividend"].find_one(
+                {"code": code}, sort=[("trade_date", -1)])
+            if dv:
+                return next((v for v in (dv.get("dv_ttm"), dv.get("dv_ratio")) if v is not None and v == v), None)
+        except Exception:
+            pass
+        return None
 
     def _get_dividend_yield(self, code: str, price: float) -> Optional[float]:
         """从 AKShare 分红历史计算股息率（最新一次分红/当前价）。
@@ -645,7 +675,7 @@ class MarketDataProvider:
                 "regular_market_price": _to_float(basic.get("close")),
                 "trailing_pe": _to_float(basic.get("pe"), None),
                 "price_to_book": _to_float(basic.get("pb"), None),
-                "dividend_yield": _to_float(basic.get("dividend_yield"), None),
+                "dividend_yield": _to_float(self._get_dividend_yield_from_db(code), None),
                 "market_cap": _to_float(basic.get("total_mv"), None),
                 "fifty_two_week_high": r52["high"],
                 "fifty_two_week_low": r52["low"],
@@ -653,6 +683,39 @@ class MarketDataProvider:
                 "latest_amount": _to_float(basic.get("latest_amount"), None),
             },
         }
+
+    def _quote_from_tencent_hk(self, code: str) -> Dict[str, Any]:
+        """腾讯港股行情快照（qt.gtimg.cn/q=hkXXXXX）。
+
+        港股估值兜底：Mongo 无港股 basic、akshare HK spot 连接不稳、yahoo 403 时用。
+        字段索引实测 hk00700 校验（与 akshare stock_hk_financial_indicator_em 交叉验证）：
+          [3] 现价  [57] 市盈率TTM  [47] 股息率%  [58] 市净率PB
+          [44]/[45] 总市值/流通市值(亿 HKD)  [48] 52周最高  [49] 52周最低  [75] 货币
+        注：[39] 是静态市盈率(LYR)，TTM 在 [57]；[47]/[58] 已交叉验证（腾讯 vs akshare 一致）。
+        """
+        symbol = f"hk{str(code).strip()}"
+        url = f"https://qt.gtimg.cn/q={urllib.parse.quote(symbol)}"
+        try:
+            text = self._read_http(url, encoding="gbk")
+            payload = text.split('="', 1)[1].rsplit('"', 1)[0]
+            fields = payload.split("~")
+            price = _to_float(fields[3] if len(fields) > 3 else None)
+            if not price or price <= 0:
+                return {"available": False, "source": "tencent", "reason": "腾讯港股行情无有效价格"}
+            market_cap_yi = _to_float(fields[44] if len(fields) > 44 else None, None)
+            metrics = {
+                "regular_market_price": price,
+                "trailing_pe": _to_float(fields[57] if len(fields) > 57 else None, None),
+                "price_to_book": _to_float(fields[58] if len(fields) > 58 else None, None),
+                "dividend_yield": _to_float(fields[47] if len(fields) > 47 else None, None),
+                "market_cap": round(market_cap_yi * 1e8, 2) if market_cap_yi else None,
+                "fifty_two_week_high": _to_float(fields[48] if len(fields) > 48 else None, None),
+                "fifty_two_week_low": _to_float(fields[49] if len(fields) > 49 else None, None),
+                "currency": fields[75] if len(fields) > 75 else "HKD",
+            }
+            return {"available": True, "source": "tencent", "metrics": metrics}
+        except Exception as exc:
+            return {"available": False, "source": "tencent", "reason": str(exc)}
 
     def _normalize_dividend_yield(self, value: Any) -> Optional[float]:
         number = _to_float(value, None)
@@ -700,7 +763,28 @@ class MarketDataProvider:
                 # MongoDB 数据过期，继续走 Yahoo 补齐
                 result["stale_reason"] = f"数据截止 {result['data_date']}（{age:.0f}天前）"
 
-        # MongoDB 无数据或过期 → Yahoo Finance fallback
+        # MongoDB 无数据或过期 → 先腾讯（本环境可用，覆盖 A股/港股/ETF，~0.1s/次），
+        # 腾讯失败或不支持 → Yahoo 兜底（最底，本环境 403 会白等，故放到最后）。
+        tencent_symbol = self._tencent_symbol(code, market)
+        if tencent_symbol:
+            tencent_bars = self._get_tencent_bars(tencent_symbol, days)
+            if tencent_bars:
+                tencent_date = tencent_bars[0].get("trade_date", "")
+                tencent_dt = _parse_date(tencent_date)
+                mongo_dt = _parse_date(result["data_date"]) if result["data_date"] else None
+                if tencent_dt and (not mongo_dt or tencent_dt > mongo_dt):
+                    result["bars"] = tencent_bars
+                    result["data_date"] = tencent_date
+                    result["source"] = "tencent"
+                    age = _data_age_days(tencent_date)
+                    result["stale"] = (age is not None and age > 1)
+                    if result["stale"]:
+                        result["stale_reason"] = f"数据截止 {tencent_date}（{age:.0f}天前）"
+                    # 回写 MongoDB，下次直接命中
+                    self._write_bars_to_mongo(code, tencent_bars)
+                    return result
+
+        # 腾讯失败或无此市场 → Yahoo Finance 兜底（最底）
         for yahoo_symbol in self._yahoo_symbols(code, market):
             yahoo_bars = self._get_yahoo_bars(yahoo_symbol, days)
             if not yahoo_bars:
@@ -723,7 +807,7 @@ class MarketDataProvider:
 
         if not result["bars"]:
             result["stale"] = True
-            result["stale_reason"] = "无可用K线数据（MongoDB + Yahoo 均无数据）"
+            result["stale_reason"] = "无可用K线数据（MongoDB + 腾讯 + Yahoo 均无数据）"
         return result
 
     def _get_yahoo_bars(self, symbol: str, days: int) -> List[Dict[str, Any]]:
@@ -820,7 +904,7 @@ class MarketDataProvider:
         return bars[-days:][::-1]
 
     def _write_bars_to_mongo(self, code: str, bars: List[Dict[str, Any]]) -> None:
-        """将 Yahoo 获取的 bars 回写到 MongoDB，补全 code + period 字段。"""
+        """将远程兜底获取的 bars（腾讯/Yahoo）回写到 MongoDB，补全 code + period 字段。"""
         if not self.mongo_available:
             return
         try:
@@ -830,9 +914,9 @@ class MarketDataProvider:
             ]
             n = self.mongo.upsert_quotes(docs)
             if n > 0:
-                logger.info(f"Yahoo 回写 MongoDB: {code} {n} 条")
+                logger.info(f"远程兜底回写 MongoDB: {code} {n} 条")
         except Exception as e:
-            logger.warning(f"Yahoo 回写 MongoDB 失败 ({code}): {e}")
+            logger.warning(f"远程兜底回写 MongoDB 失败 ({code}): {e}")
 
     # ================================================================
     # 4. 趋势+技术指标 — 基于 bars 计算
@@ -1096,18 +1180,23 @@ class MarketDataProvider:
         if len(closes) <= period:
             return None
 
+        # closes 为倒序（最新在前），反转成正序后 Wilder 平滑才能沿时间正确递推。
+        # 与 _macd 同款 bug 的修复：倒序递推会让「最旧」的历史数据主导结果，
+        # 得出反向 RSI（重远期、轻近期）。
+        seq = list(reversed(closes))
+
         # 初始 avg_gain / avg_loss：前 period 根 K 线的简单平均
         gains, losses = [], []
         for i in range(1, period + 1):
-            change = closes[i - 1] - closes[i]
+            change = seq[i] - seq[i - 1]
             gains.append(max(change, 0))
             losses.append(abs(min(change, 0)))
         avg_gain = sum(gains) / period
         avg_loss = sum(losses) / period
 
         # 后续 K 线：Wilder 平滑 (n-1)/n × prev + 1/n × current
-        for i in range(period + 1, len(closes)):
-            change = closes[i - 1] - closes[i]
+        for i in range(period + 1, len(seq)):
+            change = seq[i] - seq[i - 1]
             avg_gain = (avg_gain * (period - 1) + max(change, 0)) / period
             avg_loss = (avg_loss * (period - 1) + abs(min(change, 0))) / period
 
@@ -1870,15 +1959,18 @@ class MarketDataProvider:
         today = datetime.now().strftime("%Y-%m-%d")
         cached = _MARKET_SENTIMENT_CACHE.get(today)
         if cached is not None:
+            # 趋势/波动/mood 按日缓存不变；但「现价」盘中随时变，逐次刷新，
+            # 否则盘前首次算（latest_close=昨收）会冻结一整天，出现「上证指数还是 3932」。
+            for name, symbol in _INDEX_SYMBOLS.items():
+                it = (cached.get("indices") or {}).get(name)
+                if it and it.get("available"):
+                    quote = self._index_realtime_quote(symbol)
+                    if quote is not None:
+                        it["latest_close"] = quote
             return cached
 
-        indices = {
-            "上证指数": "sh000001",
-            "创业板指": "sz399006",
-            "沪深300": "sh000300",
-        }
         sentiments = {}
-        for name, symbol in indices.items():
+        for name, symbol in _INDEX_SYMBOLS.items():
             bars = self._get_tencent_bars(symbol, 30)
             if len(bars) < 5:
                 sentiments[name] = {"available": False}
@@ -1887,9 +1979,15 @@ class MarketDataProvider:
             if len(closes) < 5:
                 sentiments[name] = {"available": False}
                 continue
-            ret_5d = self._return_pct(closes, 5)
-            ret_20d = self._return_pct(closes, 20)
-            vol_20d = self._volatility(closes, 20)
+            # 实时价（盘中为现价）取 closes[0]；趋势/波动只用「已收盘」日线（剔除今天未收盘 bar），
+            # 避免 5日/20日收益、波动、mood 盘中随实时价漂移，与「情绪基于日线、盘中不变」一致。
+            settled_closes = [
+                b["close"] for b in bars
+                if b.get("close", 0) > 0 and str(b.get("trade_date", "")) != today
+            ]
+            ret_5d = self._return_pct(settled_closes, 5)
+            ret_20d = self._return_pct(settled_closes, 20)
+            vol_20d = self._volatility(settled_closes, 20)
             sentiments[name] = {
                 "available": True,
                 "latest_close": closes[0],
@@ -1941,6 +2039,29 @@ class MarketDataProvider:
                   "industry_moneyflow": ind_mf}
         _MARKET_SENTIMENT_CACHE[today] = result
         return result
+
+    def _index_realtime_quote(self, symbol: str) -> Optional[float]:
+        """指数实时现价（腾讯 qt.gtimg.cn），60s 短缓存。
+
+        仅取现价 fields[3]；盘中为最新价，盘前/收盘后为最近一次成交价。失败返回 None，
+        调用方保留原 latest_close（不回退成 0）。
+        """
+        now = time.time()
+        entry = _INDEX_QUOTE_CACHE.get(symbol)
+        if entry and (now - entry[0]) < 60:
+            return entry[1]
+        url = f"https://qt.gtimg.cn/q={urllib.parse.quote(symbol)}"
+        try:
+            text = self._read_http(url, encoding="gbk")
+            payload = text.split('="', 1)[1].rsplit('"', 1)[0]
+            fields = payload.split("~")
+            price = _to_float(fields[3] if len(fields) > 3 else None)
+            if price > 0:
+                _INDEX_QUOTE_CACHE[symbol] = (now, price)
+                return price
+        except Exception as exc:
+            self._record_error(f"指数实时行情异常 {symbol}: {exc}")
+        return None
 
     def _get_north_bound_flow(self) -> Dict[str, Any]:
         """获取近期北向/南向成交净买额。
@@ -2055,22 +2176,39 @@ class MarketDataProvider:
             return {"available": False, "reason": str(exc)}
 
     def _get_margin_data(self) -> Dict[str, Any]:
-        """融资融券余额（Tushare margin）。"""
+        """融资融券余额（Tushare margin）。两融数据 T+1 发布，当日常为空，回退最近可用交易日。"""
         try:
             pro = self._get_tushare_pro()
             if pro is None:
                 return {"available": False}
-            today = _utc_now().strftime("%Y%m%d")
-            df = pro.margin(trade_date=today)
+            # 两融 T+1：从今天往前最多找 5 个自然日，取最近有数据的那天
+            df = None
+            trade_date = None
+            for i in range(5):
+                d = (_utc_now() - timedelta(days=i)).strftime("%Y%m%d")
+                try:
+                    df = pro.margin(trade_date=d)
+                except Exception:
+                    df = None
+                if df is not None and not df.empty:
+                    trade_date = d
+                    break
             if df is None or df.empty:
                 return {"available": False}
-            r = df.iloc[0]
+            # Tushare margin 按交易所返回多行（SSE/SZSE/BSE），跨交易所求和才是全市场两融；
+            # 原始金额单位是元，统一换算成亿元输出（sum 跨交易所，再 /1e8）。
+            def _sum_yi(col: str) -> Optional[float]:
+                try:
+                    return round(float(df[col].sum()) / 1e8, 2)
+                except Exception:
+                    return None
             return {
                 "available": True, "source": "tushare",
-                "rzye": _to_float(r.get("rzye"), None),  # 融资余额(亿)
-                "rqye": _to_float(r.get("rqye"), None),  # 融券余额(亿)
-                "rzmre": _to_float(r.get("rzmre"), None),  # 融资买入额(亿)
-                "date": str(r.get("trade_date", "")),
+                "rzye": _sum_yi("rzye"),    # 融资余额(亿)
+                "rqye": _sum_yi("rqye"),    # 融券余额(亿)
+                "rzrqye": _sum_yi("rzrqye"),  # 两融余额合计(亿)
+                "rzmre": _sum_yi("rzmre"),  # 融资买入额(亿)
+                "date": str(trade_date or ""),
             }
         except Exception:
             return {"available": False}
@@ -2164,10 +2302,14 @@ class MarketDataProvider:
             return {"available": False, "reason": str(exc)}
 
     def _get_industry_moneyflow(self) -> Dict[str, Any]:
-        """行业资金流 — 从 stock_signals 缓存中的个股 moneyflow_net 按行业汇总。
+        """行业资金流 — 从 industry_moneyflow 集合读取（与 sector_radar 同源同口径）。
 
-        数据源：Tushare moneyflow API → precompute_history 缓存到 stock_factors。
-        优势：不依赖外部网络API，直接读本地MongoDB，每次review必可用。
+        数据源：Tushare moneyflow 的 net_mf_amount（主力净额=大单+特大单）→ data_import_pipeline
+        按申万行业聚合到 industry_moneyflow 集合。这里取最近 3 个交易日累计（与
+        sector_radar._check_industry_moneyflow 一致），万元→亿元。
+
+        此前误用 stock_signals.moneyflow_net（实为 buy_lg-sell_lg，仅大单净额），与行业雷达
+        的主力净额口径不一致，导致面板与雷达数据对不上。
         """
         if not self.mongo_available:
             return {"available": False, "reason": "MongoDB 不可用"}
@@ -2175,42 +2317,35 @@ class MarketDataProvider:
         try:
             from collections import defaultdict
 
-            # 从 stock_signals 拿所有有 moneyflow_net 的股票
-            pipeline = [
-                {"$match": {
-                    "computed_at": {"$gte": (datetime.now(timezone.utc) - timedelta(days=3)).strftime("%Y-%m-%d")},
-                    "moneyflow_net": {"$exists": True, "$ne": 0},
-                }},
-                {"$project": {"code": 1, "moneyflow_net": 1}},
-            ]
-            stocks = list(self.mongo.db["stock_signals"].aggregate(pipeline))
-            if len(stocks) < 50:
-                return {"available": False,
-                        "reason": f"近期资金流数据不足（仅{len(stocks)}只），请运行 precompute_history.py --date today"}
+            coll = self.mongo.db.get_collection("industry_moneyflow")
+            if coll is None:
+                return {"available": False, "reason": "industry_moneyflow 集合不存在"}
 
-            codes = [s["code"] for s in stocks]
-            mf_map = {s["code"]: s["moneyflow_net"] for s in stocks}
+            dates = sorted(coll.distinct("trade_date"), reverse=True)[:3]
+            if not dates:
+                return {"available": False, "reason": "industry_moneyflow 无数据"}
 
-            # 批量查行业
-            ind_map = {}
-            for doc in self.mongo.db[self.mongo.collections["basic_info"]].find(
-                {"code": {"$in": codes}},
-                {"code": 1, "industry": 1},
-            ):
-                ind_map[doc["code"]] = doc.get("industry", "未知")
+            docs = list(coll.find(
+                {"trade_date": {"$in": dates}},
+                {"industry_name": 1, "trade_date": 1, "net_amount": 1, "stock_count": 1, "_id": 0}
+            ))
+            if len(docs) < 5:
+                return {"available": False, "reason": f"行业资金流数据不足（仅{len(docs)}条）"}
 
-            # 按行业汇总（万元→亿元）
+            # 按行业累计最近 3 个交易日主力净额；stock_count 取最新一天口径（避免跨日重复计数）
+            latest = dates[0]
             ind_flow = defaultdict(lambda: {"net": 0.0, "cnt": 0})
-            for code, mf in mf_map.items():
-                ind = ind_map.get(code, "未知")
-                ind_flow[ind]["net"] += mf
-                ind_flow[ind]["cnt"] += 1
+            for d in docs:
+                ind = d.get("industry_name") or "未知"
+                ind_flow[ind]["net"] += d.get("net_amount", 0) or 0
+                if str(d.get("trade_date", "")) == latest:
+                    ind_flow[ind]["cnt"] = d.get("stock_count", 0) or 0
 
             ranked = sorted(ind_flow.items(), key=lambda x: x[1]["net"], reverse=True)
             top_in = []
             top_out = []
             for ind, d in ranked:
-                flow = round(d["net"] / 1e4, 2)  # 万元→亿
+                flow = round(d["net"] / 1e4, 2)  # 万元 → 亿
                 if flow == 0:
                     continue
                 entry = {"industry": ind, "net_flow": flow, "stock_count": d["cnt"]}
@@ -2219,13 +2354,11 @@ class MarketDataProvider:
                 else:
                     top_out.append(entry)
 
-            # 取实际数据日期
-            data_date = stocks[0].get("computed_at", "") if stocks else ""
             return {
                 "available": True,
-                "source": "Tushare→stock_signals缓存",
-                "data_date": data_date,
-                "stocks_with_data": len(stocks),
+                "source": "industry_moneyflow(主力净额)",
+                "data_date": latest,
+                "stocks_with_data": len(docs),
                 "top_inflow": top_in[:10],
                 "top_outflow": top_out[-10:][::-1] if top_out else [],
             }

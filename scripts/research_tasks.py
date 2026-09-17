@@ -170,7 +170,7 @@ def _execute_task(task: Dict[str, Any]) -> Dict[str, Any]:
         # Phase 4 支持：由 debate_session 提供执行函数
         from debate_session import run_debate_turn
 
-        return run_debate_turn(task)
+        return run_debate_turn(task, on_session=_on_session)
     return research_engine.run_research(
         rtype,
         target=task.get("target", ""),

@@ -23,7 +23,7 @@ import subprocess
 import sys
 import time
 import uuid
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 # 项目根目录（scripts/ 的上一级）
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -42,10 +42,15 @@ def get_data_base(code: str, market: str = "A股") -> Dict[str, Any]:
     """从 scripts 定量层拿一只股票的数据底座。
 
     复用 PortfolioStrategy.analyze_stock()（scripts/portfolio_strategy.py:695），
-    只提取喂给辩论 agent 的确定性字段：
+    提取喂给辩论 agent 的确定性字段：
       - trend_signal：RSI/MACD/KDJ/均线/量价/支撑压力（market_data_provider.get_trend_signal）
       - quote_snapshot：PE/PB/市值/股息率/52周高低点（估值核心）
       - llm_context：四因子(价值/成长/质量/动量)+事件情绪，purpose="llm_input"
+      - moneyflow：主力/大单资金流（analyze_stock 已算，此前漏透传）
+      - news：新闻原文（标题+摘要，截断控制长度）
+      - tushare_signals：回购/股东户数/两融/业绩预告/财务
+      - cycle：行业周期(cycle_score)+趋势/宽度/资金流+业务组因子分（stock_factors 预计算）
+      - data_quality：口径一致性自检（52周/MACD/业绩预告/换手率等主动标注）
     """
     from portfolio_strategy import PortfolioStrategy
 
@@ -63,6 +68,34 @@ def get_data_base(code: str, market: str = "A股") -> Dict[str, Any]:
     if isinstance(ss, dict) and ss.get("llm_context"):
         base["llm_context"] = ss["llm_context"]
 
+    # 资金流（主力/大单/超大单，tushare，analyze_stock 已算）
+    if isinstance(report.get("moneyflow"), dict):
+        base["moneyflow"] = report["moneyflow"]
+
+    # 新闻（截断：最多 5 条，正文压缩到 160 字，避免底座膨胀）
+    news = report.get("news") or []
+    if isinstance(news, list) and news:
+        base["news"] = [
+            {
+                "title": (n.get("title") or "")[:120],
+                "summary": (n.get("content") or "")[:160],
+                "publish_time": n.get("publish_time"),
+                "source": n.get("source"),
+            }
+            for n in news[:5]
+        ]
+
+    # Tushare 专属信号（回购/股东户数/两融/业绩预告/财务，港股含南向）
+    if isinstance(report.get("tushare_signals"), dict):
+        base["tushare_signals"] = report["tushare_signals"]
+
+    # 自身历史 PE 分位（stock_signals.pe_percentile）
+    if report.get("pe_percentile_self") is not None:
+        base["pe_percentile_self"] = report["pe_percentile_self"]
+
+    # 行业周期 + 趋势/宽度/资金流 + 业务组因子分（stock_factors 预计算，review 同源）
+    base["cycle"] = _load_cycle_context(ps, code)
+
     # 名称/行业（供页面标题与流派背景使用）
     base["asset"] = {
         "code": code,
@@ -70,7 +103,113 @@ def get_data_base(code: str, market: str = "A股") -> Dict[str, Any]:
         "market": market,
         "industry": report.get("industry_peers") and report.get("industry_peers"),
     }
+
+    # 口径一致性自检：主动标注脏数据/矛盾，不靠 LLM 碰运气发现
+    base["data_quality"] = _data_self_check(base)
     return base
+
+
+def _load_cycle_context(ps, code: str) -> Dict[str, Any]:
+    """从 stock_factors 预计算表取行业周期/趋势/宽度/资金流 + 业务组因子分。
+
+    与 portfolio_strategy.review() 的 alpha_context（:615-626）同源，保证口径一致。
+    读取失败返回空 dict，不阻断底座。
+    """
+    out: Dict[str, Any] = {}
+    try:
+        fac_doc = ps.data_provider.mongo.db["stock_factors"].find_one(
+            {"code": str(code).strip(), "trade_date": {"$exists": True}},
+            sort=[("trade_date", -1)],
+        )
+        if not fac_doc:
+            return out
+        group = fac_doc.get("group", "")
+        gfac = (fac_doc.get("factors") or {}).get(group, {}) or {}
+        out = {
+            "group": group,
+            "trade_date": fac_doc.get("trade_date"),
+            "cycle_score": fac_doc.get("cycle_score"),
+            "turnaround_score": fac_doc.get("turnaround_score"),
+            "industry_trend": fac_doc.get("industry_trend"),
+            "industry_breadth": fac_doc.get("industry_breadth"),
+            "industry_flow": fac_doc.get("industry_flow"),
+            "group_composite_score": gfac.get("composite_score"),
+            "group_factor_scores": gfac.get("factor_scores"),
+        }
+    except Exception:
+        pass
+    return out
+
+
+def _data_self_check(base: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """数据底座口径一致性自检，返回异常清单（空列表=未发现异常）。
+
+    目的：把「52周高低冲突」「MACD 全0」「forecast 越界」等已知脏数据在底座侧主动
+    标注出来，而非每次靠 LLM 自己撞见（兆易创新那次两个 agent 各自发现一遍）。
+    """
+    checks: List[Dict[str, Any]] = []
+
+    qs = (base.get("quote_snapshot") or {}).get("metrics") or {}
+    ts = base.get("trend_signal") or {}
+    ti = ts.get("technical_indicators") or {}
+    rp = ti.get("range_position") or {}
+
+    # 1. 52周高低 vs 120日区间交叉：52周（约250交易日）应 ⊇ 120日
+    high_52w = qs.get("fifty_two_week_high")
+    low_52w = qs.get("fifty_two_week_low")
+    high_120 = (rp.get("120d") or {}).get("high")
+    low_120 = (rp.get("120d") or {}).get("low")
+    if high_52w and high_120 and high_52w < high_120:
+        checks.append({"field": "52周高低", "severity": "warning",
+                       "message": f"52周高 {high_52w} < 120日高 {high_120}，口径矛盾（52周应包含120日），引用回撤幅度需谨慎"})
+    if low_52w and low_120 and low_52w > low_120:
+        checks.append({"field": "52周高低", "severity": "warning",
+                       "message": f"52周低 {low_52w} > 120日低 {low_120}，口径矛盾"})
+
+    # 2. MACD 三项全 0 → 未有效计算（历史 bug：_ema_series 递推错误曾致全市场全0）
+    macd = ti.get("macd") or {}
+    if macd and macd.get("dif") == 0 and macd.get("dea") == 0 and macd.get("histogram") == 0:
+        checks.append({"field": "MACD", "severity": "warning",
+                       "message": "MACD 三项全 0，疑似未有效计算，引用需谨慎"})
+
+    # 3. 业绩预告越界（如 forecast=1099% 脏数据）
+    fc = (base.get("tushare_signals") or {}).get("forecast") or {}
+    p_min = fc.get("p_change_min")
+    p_max = fc.get("p_change_max")
+    if p_min is not None and abs(float(p_min)) >= 1000:
+        checks.append({"field": "业绩预告", "severity": "warning",
+                       "message": f"业绩预告增速 {p_min}%~{p_max}% 异常（疑似脏数据），不采信"})
+
+    # 4. 换手率缺失
+    if "turnover_rate" in qs and not qs.get("turnover_rate"):
+        checks.append({"field": "换手率", "severity": "info", "message": "换手率缺失"})
+
+    # 5. 因子口径不一致：实时(llm_context) vs 预计算(stock_factors 业务组) 差异显著
+    live_comp = (((base.get("llm_context") or {}).get("signal_contexts") or {})
+                 .get("factor", {}).get("facts", {}).get("composite_score"))
+    pre_comp = (base.get("cycle") or {}).get("group_composite_score")
+    if live_comp is not None and pre_comp is not None and abs(float(live_comp) - float(pre_comp)) >= 0.15:
+        checks.append({"field": "因子口径", "severity": "warning",
+                       "message": f"实时因子综合 {live_comp} vs 预计算(业务组)综合 {pre_comp} 差异显著，口径不一致，需注明采用哪套"})
+
+    # 6. 预计算因子财务缺失：stock_factors 最新行 fin_report_period 为空 → value/growth/quality 全 0
+    gfs = (base.get("cycle") or {}).get("group_factor_scores") or {}
+    if gfs and gfs.get("value") == 0 and gfs.get("growth") == 0 and gfs.get("quality") == 0:
+        checks.append({"field": "预计算因子", "severity": "warning",
+                       "message": "stock_factors 最新行业务组因子分 value/growth/quality 全 0（财务数据缺失），请以实时 llm_context 因子为准"})
+
+    # 7. RSI 与 KDJ 方向背离：同为 0-100 动量指标，正常应落在相近区间；
+    #    拉开 ≥40 点（一边偏强一边偏弱）大概率是方向性 bug 或重大背离，需标注存疑。
+    #    （历史 bug：_rsi 未反转倒序 closes，Wilder 平滑沿最新→最旧递推，RSI 反向污染，
+    #    如 300750 曾算出 RSI=68.41 vs KDJ-K≈18 超卖，正确应为超卖 RSI≈26）
+    rsi14 = ti.get("rsi14")
+    k_val = (ti.get("kdj") or {}).get("k")
+    if isinstance(rsi14, (int, float)) and isinstance(k_val, (int, float)) and rsi14 == rsi14 and k_val == k_val:
+        if abs(float(rsi14) - float(k_val)) >= 40:
+            checks.append({"field": "RSI/KDJ背离", "severity": "warning",
+                           "message": f"RSI14={float(rsi14):.2f} 与 KDJ-K={float(k_val):.2f} 相差 {abs(float(rsi14) - float(k_val)):.1f} 点（≥40），方向疑似背离，引用需谨慎"})
+
+    return checks
 
 
 def clean_output(text: str) -> str:

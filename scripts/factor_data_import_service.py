@@ -11,7 +11,7 @@ runtime surface.
 import argparse
 import os
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 try:  # Python 3.11+ 暴露 UTC 常量；3.9/3.10 用 timezone.utc 回退
     from datetime import UTC
 except ImportError:
@@ -38,9 +38,27 @@ def _safe_float(value: Any, default: Optional[float] = None) -> Optional[float]:
     try:
         if isinstance(value, str):
             value = value.replace(",", "").replace("%", "").strip()
-        return float(value)
+        result = float(value)
+        return default if result != result else result  # NaN → default
     except (TypeError, ValueError):
         return default
+
+
+def _estimate_disclosure_date(report_period: Any) -> Optional[str]:
+    """按 report_period 估算财报披露日（akshare 实时导入不返回披露日，这里补齐）。
+
+    规则同 import_historical_financials.estimate_disclosure_date，保守估值避免 look-ahead：
+      年报(12-31) → +120 天；半年报(06-30) → +62 天；季报(03-31/09-30) → +45 天。
+    """
+    try:
+        dt = datetime.strptime(str(report_period), "%Y%m%d")
+    except (TypeError, ValueError):
+        return None
+    if dt.month == 12 and dt.day == 31:
+        return (dt + timedelta(days=120)).strftime("%Y-%m-%d")
+    if dt.month == 6 and dt.day == 30:
+        return (dt + timedelta(days=62)).strftime("%Y-%m-%d")
+    return (dt + timedelta(days=45)).strftime("%Y-%m-%d")
 
 
 def _clean_code(code: Any, market: str = "A股") -> str:
@@ -457,7 +475,6 @@ class FactorDataImporter:
         trailing_pe = metrics.get("trailing_pe")
         forward_pe = metrics.get("forward_pe")
         price_to_book = metrics.get("price_to_book")
-        dividend_yield = metrics.get("dividend_yield")
 
         if basic.get("pe") in (None, "", 0):
             basic["pe"] = trailing_pe or forward_pe
@@ -467,8 +484,6 @@ class FactorDataImporter:
             basic["pb"] = price_to_book
         if basic.get("pb_ratio") in (None, "", 0):
             basic["pb_ratio"] = price_to_book
-        if basic.get("dividend_yield") in (None, ""):
-            basic["dividend_yield"] = dividend_yield
         if metrics.get("market_cap") and not basic.get("total_mv"):
             basic["total_mv"] = metrics.get("market_cap")
 
@@ -933,8 +948,9 @@ class FactorDataImporter:
             price = _safe_float(fields[3] if len(fields) > 3 else None)
             if not price or price <= 0:
                 return None
+            amount = _safe_float(fields[37] if len(fields) > 37 else None, None)
             # 字段索引: 1=名称, 3=最新价, 31=涨跌额, 32=涨跌幅,
-            #           33=最高, 34=最低, 37=成交额, 39=PE, 43=PB,
+            #           33=最高, 34=最低, 37=成交额(元), 39=PE, 43=PB,
             #           44=总市值(亿), 47=股息率(%), 48=52周高, 49=52周低
             return {
                 "name": fields[1] if len(fields) > 1 else "",
@@ -944,7 +960,7 @@ class FactorDataImporter:
                 "pb": _safe_float(fields[43] if len(fields) > 43 else None, None),
                 "dividend_yield": _safe_float(fields[47] if len(fields) > 47 else None, None),
                 "total_mv": round(_safe_float(fields[44] if len(fields) > 44 else None, 0) * 1e8, 2) if _safe_float(fields[44] if len(fields) > 44 else None, None) else None,
-                "latest_amount": _safe_float(fields[37] if len(fields) > 37 else None, None),
+                "latest_amount": amount / 1e4 if amount is not None else None,
                 "fifty_two_week_high": _safe_float(fields[48] if len(fields) > 48 else None, None),
                 "fifty_two_week_low": _safe_float(fields[49] if len(fields) > 49 else None, None),
                 "data_source": "tencent_hk",
@@ -976,6 +992,7 @@ class FactorDataImporter:
             price = _safe_float(data.get("f43"))
             if not price or price <= 0:
                 return None
+            amount = _safe_float(data.get("f6"), None)
             return {
                 "name": data.get("f57", ""),
                 "close": round(price / 100, 4) if price > 100 else price,
@@ -983,7 +1000,7 @@ class FactorDataImporter:
                 "pe": _safe_float(data.get("f9"), None),
                 "pb": _safe_float(data.get("f37"), None),
                 "total_mv": _safe_float(data.get("f20"), None),
-                "latest_amount": _safe_float(data.get("f6"), None),
+                "latest_amount": amount / 1e4 if amount is not None else None,
                 "data_source": "eastmoney_push2_hk",
             }
         except Exception:
@@ -1023,10 +1040,11 @@ class FactorDataImporter:
                 "港股",
                 "HKD",
             )
+            amount = _safe_float(row.get("成交额"), None)
             doc.update({
                 "name": row.get("中文名称") or row.get("名称") or code,
                 "close": _safe_float(row.get("最新价")),
-                "latest_amount": _safe_float(row.get("成交额")),
+                "latest_amount": amount / 1e4 if amount is not None else None,
                 "pe": _safe_float(row.get("市盈率")),
                 "total_mv": _safe_float(row.get("总市值")),
                 "pct_chg": _safe_float(row.get("涨跌幅")),
@@ -1298,6 +1316,7 @@ class FactorDataImporter:
             "currency": currency,
             "report_period": self._normalize_report_period(chosen_col),
             "report_type": "latest",
+            "estimated_disclosure": _estimate_disclosure_date(self._normalize_report_period(chosen_col)),
             "roe": pick("净资产收益率(ROE)", "净资产收益率", "加权净资产收益率", "净资产收益率"),
             "gross_margin": pick("毛利率", "销售毛利率"),
             "net_margin": pick("销售净利率", "净利率"),
@@ -1328,7 +1347,10 @@ def _portfolio_positions(path: str, include_watchlist: bool = False) -> List[Dic
     positions = list(portfolio.get("positions") or [])
     if include_watchlist:
         positions.extend(portfolio.get("watchlist") or [])
-    return [item for item in positions if item.get("asset_type") == "stock"]
+    # 纳入 ETF：sync_position 有专门的 etf 分支（基础+行情，无财务），
+    # 数据就绪/补齐工具应覆盖 ETF，否则 ETF 持仓永远显示「缺 basic,quotes」。
+    return [item for item in positions if item.get("asset_type") in ("stock", "etf")]
+
 
 
 def main() -> None:

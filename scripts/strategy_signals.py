@@ -109,11 +109,13 @@ class StrategySignalCollector:
                 return self._unavailable(f"MongoDB 行情样本不足: {len(quotes)}，请先同步近 260 日行情")
 
             financial = provider.get_financial_data(code)
-            score_result = strategy.calculate_composite_score(
+            # 业务组口径：组权重 + 组打分 + V2 动量，与 precompute_history 完全一致
+            market_context = strategy.load_market_momentum_context()
+            score_result = strategy.calculate_composite_score_with_group(
                 stock,
                 quotes,
                 financial,
-                context=position,
+                market_context=market_context,
             )
             composite_score = score_result["composite_score"]
             factor_scores = score_result["factor_scores"]
@@ -177,8 +179,15 @@ class StrategySignalCollector:
         return self._event_cache_col
 
     def _event_cache_key(self, code: str, market: str) -> str:
-        """情绪信号缓存 key：标的代码 + 市场 + 当日日期（跨天自动失效）。"""
-        return f"{code}:{market or 'A股'}:{datetime.now().strftime('%Y-%m-%d')}"
+        """情绪信号缓存 key：标的代码 + 市场 + 日期 + 半小时分桶。
+
+        分钟对齐到 0/30（如 10:15→10:00、10:45→10:30），每半小时自动失效刷新，
+        兼顾情绪新鲜度（盘中突发新闻半小时内反映）与 LLM 调用频率（旧新闻文本
+        hash 仍命中 sentiment_cache，不会重复调 LLM）。
+        """
+        now = datetime.now()
+        bucket = (now.minute // 30) * 30  # 0 或 30
+        return f"{code}:{market or 'A股'}:{now.strftime('%Y-%m-%d')}:{now.hour:02d}:{bucket:02d}"
 
     def _lookup_event_cache(self, key: str) -> Optional[Dict[str, Any]]:
         col = self._get_event_cache_col()

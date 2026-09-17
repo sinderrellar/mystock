@@ -54,7 +54,18 @@ def main() -> int:
         sys.stderr.write("错误：未提供股票代码\n")
         return 1
 
-    evidence = debate_session._build_evidence(code, args.market)
+    # 若给了 session，读出 user_id 以便注入持仓上下文（该标的恰好是持仓时）
+    user_id = ""
+    if args.session:
+        try:
+            sdoc = debate_session._get_mongo()[debate_session.COL_SESSIONS].find_one(
+                {"session_id": args.session}
+            )
+            user_id = (sdoc or {}).get("user_id", "") or ""
+        except Exception:
+            pass
+
+    evidence = debate_session._build_evidence(code, args.market, user_id)
 
     # 可选回写 session（只 $set，遵守禁删约束；失败不阻断取数）
     if args.session:

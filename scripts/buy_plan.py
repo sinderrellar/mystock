@@ -78,6 +78,23 @@ def _get_buy_plan_config() -> Dict[str, Any]:
 
 
 
+def _get_market_regime_config() -> Dict[str, Any]:
+    """从 config_complete.yaml 读 market_regime（在 pyramid_middle_layer 下，与 buy_plan 同级）。
+
+    注意：不能用 _get_buy_plan_config()——它只返回 pyramid_middle_layer.buy_plan，
+    而 market_regime 在 buy_plan 之外，旧代码因此一直读不到、走了 fallback 默认值。
+    """
+    import yaml
+
+    config_path = os.path.join(PROJECT_ROOT, "config", "config_complete.yaml")
+    try:
+        with open(config_path) as f:
+            cfg = yaml.safe_load(f)
+        return ((cfg.get("pyramid_middle_layer") or {}).get("market_regime") or {})
+    except Exception:
+        return {}
+
+
 from factor_data_import_service import _load_mongodb_config, MongoFactorDataStore
 
 from market_data_provider import MarketDataProvider
@@ -108,7 +125,7 @@ def _to_float(v: Any, default: float = 0.0) -> float:
 
 
 
-def get_layer0_filter(industries: Optional[List[str]] = None) -> tuple:
+def get_layer0_filter(industries: Optional[List[str]] = None, overrides: Optional[Dict[str, Any]] = None) -> tuple:
 
     """Layer 0 生存过滤 — 阈值从 config_complete.yaml 读取，不再一刀切。
 
@@ -158,6 +175,15 @@ def get_layer0_filter(industries: Optional[List[str]] = None) -> tuple:
 
         pe_max = 200
 
+
+
+    overrides = overrides or {}
+    if "pe_max" in overrides:
+        pe_max = overrides["pe_max"]
+    if "min_market_cap" in overrides:
+        min_mv = overrides["min_market_cap"]
+    if "min_amount" in overrides:
+        min_amount = overrides["min_amount"]
 
 
     query: Dict[str, Any] = {
@@ -252,7 +278,7 @@ class BuyPlanEngine:
 
 
 
-    def _broad_screen(self, industries: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+    def _broad_screen(self, industries: Optional[List[str]] = None, thresholds: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
 
         """Layer 0: 生存过滤 — MongoDB 直接查询，和 import_universe_quotes 统一。"""
 
@@ -270,7 +296,7 @@ class BuyPlanEngine:
 
         coll = self.mongo.db[self.mongo.collections["basic_info"]]
 
-        query, projection = get_layer0_filter(industries)
+        query, projection = get_layer0_filter(industries, overrides=thresholds)
 
         raw = list(coll.find(query, projection).sort("latest_amount", -1))
 
@@ -519,6 +545,24 @@ class BuyPlanEngine:
 
         codes_with_factor = [c["code"] for c in candidates_with_factor]
 
+        # ── 财务层：最新报告期 ROE（弱势套件质量门槛用）──
+
+        fin_coll = self.mongo.db["stock_financial_data"]
+
+        roe_map = {}
+
+        for doc in fin_coll.find(
+
+            {"code": {"$in": codes_with_factor}, "roe": {"$exists": True, "$ne": None}},
+
+            {"code": 1, "report_period": 1, "roe": 1, "_id": 0}
+
+        ).sort("report_period", -1):
+
+            if doc["code"] not in roe_map:  # report_period 倒序，首条即最新期
+
+                roe_map[doc["code"]] = doc["roe"]
+
         trend_cache = {}
 
         for doc in trends_coll.find(
@@ -607,6 +651,8 @@ class BuyPlanEngine:
 
                             "turnaround_score": turnaround_map.get(code, 0.5),
 
+                            "roe": roe_map.get(code),
+
                             "pe_percentile": None, "forecast_min": None,
 
                             "forecast_max": None, "moneyflow_net": None})
@@ -693,6 +739,60 @@ class BuyPlanEngine:
 
 
 
+    def _resolve_regime(self, breadth_pct: float, target_date: Optional[str] = None) -> str:
+        """即时市场状态 + 防抖：新档位连续维持 regime_confirm_days 个交易日才切换。
+
+        历史回测（target_date 指定 / self._hist）不防抖，直接即时判定。
+        状态持久化在 market_regime_state（单文档 upsert，只增不改，遵守禁删）。
+        """
+        regime_cfg = _get_market_regime_config()
+        strong_line = regime_cfg.get("strong_breadth", 60)
+        weak_line = regime_cfg.get("weak_breadth", 35)
+        if breadth_pct >= strong_line:
+            instant = "strong"
+        elif breadth_pct >= weak_line:
+            instant = "neutral"
+        else:
+            instant = "weak"
+
+        confirm_days = int(regime_cfg.get("regime_confirm_days", 3) or 3)
+
+        if self._hist or target_date or self.mongo is None:
+            return instant
+
+        col = self.mongo.db["market_regime_state"]
+        state = col.find_one({"key": "current"})
+        active = (state or {}).get("active_regime")
+        pending = (state or {}).get("pending_regime")
+        pending_days = int((state or {}).get("pending_days") or 0)
+
+        if active is None:
+            active = instant
+            pending = instant
+            pending_days = confirm_days
+        elif instant == pending:
+            pending_days += 1
+            if pending_days >= confirm_days and instant != active:
+                active = instant
+        else:
+            pending = instant
+            pending_days = 1
+
+        col.update_one(
+            {"key": "current"},
+            {"$set": {
+                "active_regime": active,
+                "pending_regime": pending,
+                "pending_days": pending_days,
+                "instant_regime": instant,
+                "breadth_pct": breadth_pct,
+                "updated_at": _utc_now().isoformat(),
+            }},
+            upsert=True,
+        )
+        return active
+
+
     def _get_portfolio_codes(self) -> set:
 
         try:
@@ -710,240 +810,126 @@ class BuyPlanEngine:
 
 
     def run(self, top_n: int = 10, initial_limit: int = 500, enrich_limit: int = 200,
-
             industries: Optional[List[str]] = None,
-
             target_date: Optional[str] = None) -> Dict[str, Any]:
-
-        # 解析 "today" → 实际日期
-
         if target_date == "today":
-
             target_date = _utc_now().strftime("%Y-%m-%d")
-
         date_label = target_date or "最新"
-
         print("=" * 60)
-
         print(f"Buy Plan — Alpha Rank 候选池 ({date_label})")
-
         if industries:
-
             print(f"  行业范围: {', '.join(industries)}")
-
         print("=" * 60)
 
+        # 市场宽度 + 牛熊状态（先算，决定 Layer0 用哪套阈值）
+        breadth_pct = self._get_market_breadth(target_date)
+        halt_pct = _get_buy_plan_config().get("market_breadth", {}).get("halt_threshold", 15)
+        if breadth_pct < halt_pct:
+            print(f"⚠ 市场宽度 {breadth_pct:.1f}% < {halt_pct}%，buy_plan 停摆（熊市不做多）")
+            return {"error": f"市场宽度不足({breadth_pct:.1f}%)，暂停推荐",
+                    "breadth_pct": breadth_pct}
 
+        # 市场状态（防抖）→ 阈值套件 + 动态 alpha 权重
+        regime = self._resolve_regime(breadth_pct, target_date)
+        regime_cfg = _get_market_regime_config()
+        _th_all = regime_cfg.get("thresholds") or {}
+        thresholds = _th_all.get(regime) or _th_all.get("neutral") or {}
+        alpha_w = regime_cfg.get("alpha_weights", {}).get(regime, {
+            "momentum": 0.45, "cycle": 0.35, "turnaround": 0.20})
+        weak_min_cycle = regime_cfg.get("weak_min_cycle", 0.50)
+        roe_min = thresholds.get("roe_min")
 
-        # Layer 0: 生存过滤（全市场，不抽样）
+        print(f"市场宽度 {breadth_pct:.1f}% → {regime} | "
+              f"阈值 pe_max={thresholds.get('pe_max', '默认')} "
+              f"市值≥{thresholds.get('min_market_cap', 0) / 1e8:.0f}亿 "
+              f"成交额≥{thresholds.get('min_amount', 0) / 1e8:.1f}亿 | "
+              f"权重 m={alpha_w['momentum']:.0%} c={alpha_w['cycle']:.0%} t={alpha_w['turnaround']:.0%}"
+              + (f" 弱市保护 cycle>{weak_min_cycle:.0%}" if regime == "weak" else ""))
 
-        candidates = self._broad_screen(industries=industries)
+        # Layer 0: 生存过滤（用当前 regime 的阈值套件）
+        candidates = self._broad_screen(industries=industries, thresholds=thresholds)
 
         # 全市场基础信息（供前端初筛漏斗做可配置筛选，如实展示漏斗头部）
-
         universe = self._get_universe()
 
         if not candidates:
-
             return {"error": "初筛无结果", "candidates": []}
 
-
-
-        # 市场宽度 + 牛熊状态
-
-        breadth_pct = self._get_market_breadth(target_date)
-
-        halt_pct = _get_buy_plan_config().get("market_breadth", {}).get("halt_threshold", 15)
-
-        if breadth_pct < halt_pct:
-
-            print(f"⚠ 市场宽度 {breadth_pct:.1f}% < {halt_pct}%，buy_plan 停摆（熊市不做多）")
-
-            return {"error": f"市场宽度不足({breadth_pct:.1f}%)，暂停推荐",
-
-                    "breadth_pct": breadth_pct}
-
-
-
-        # 短周期市场状态 → 动态 alpha 权重
-
-        regime_cfg = _get_buy_plan_config().get("market_regime", {})
-
-        strong_line = regime_cfg.get("strong_breadth", 60)
-
-        weak_line = regime_cfg.get("weak_breadth", 35)
-
-        if breadth_pct >= strong_line:
-
-            regime = "strong"
-
-        elif breadth_pct >= weak_line:
-
-            regime = "neutral"
-
-        else:
-
-            regime = "weak"
-
-        alpha_w = regime_cfg.get("alpha_weights", {}).get(regime, {
-
-            "momentum": 0.45, "cycle": 0.35, "turnaround": 0.20})
-
-        weak_min_cycle = regime_cfg.get("weak_min_cycle", 0.50)
-
-        print(f"市场宽度 {breadth_pct:.1f}% → {regime} 权重 "
-
-              f"m={alpha_w['momentum']:.0%} c={alpha_w['cycle']:.0%} t={alpha_w['turnaround']:.0%}"
-
-              + (f" 弱市保护 cycle>{weak_min_cycle:.0%}" if regime == "weak" else ""))
-
-
-
         # 补齐因子数据
-
         eff_limit = enrich_limit if enrich_limit > 0 else len(candidates)
-
         scored = self._enrich(candidates, limit=min(len(candidates), eff_limit),
-
                               target_date=target_date)
 
-
-
         # ── v3 候选池生成：因子评分 + 打标签（全量，供前端漏斗筛选）──
-
-
-
-        # 计算 alpha_score + 打标签（无条件，含 cycle<0.20 的项）
-
         portfolio_codes = self._get_portfolio_codes()
-
         for s in scored:
-
             factor = s.get("factor", {})
-
             momentum = (factor.get("factor_scores") or {}).get("momentum", 0.5)
-
             cycle = s.get("cycle_score", 0.5)
-
             turnaround = s.get("turnaround_score", 0.5)
 
-
-
-            # alpha = 动量 + 周期 + 拐点（权重按牛熊动态调整）；原始分不降权
-
             s["alpha_score"] = round(
-
                 momentum * alpha_w["momentum"]
-
                 + cycle * alpha_w["cycle"]
-
                 + turnaround * alpha_w["turnaround"], 3)
-
             s["in_portfolio"] = s["code"] in portfolio_codes
 
-
-
-            # 纯标签，不参与过滤
-
             s["strategy_tags"] = ["动量突破"]
-
             s["tag_momentum"] = True
-
             s["tag_cycle"] = cycle >= 0.20
-
             s["tag_turnaround"] = turnaround >= 0.7
-
             if cycle >= 0.20:
-
                 s["strategy_tags"].append("周期共振")
-
             if turnaround >= 0.7:
-
                 s["strategy_tags"].append("低位拐点")
-
             s["strategy_count"] = len(s["strategy_tags"])
-
-
-
-        # pool：完整打分池（原始 alpha_score，不降权），供前端动态筛选
 
         pool = sorted(scored, key=lambda x: x["alpha_score"], reverse=True)
 
-
-
-        # 默认过滤：行业极弱不做；弱势市场须 cycle 确认（保留 CLI/旧行为）
+        # 弱势质量门槛：ROE≥roe_min（仅实时模式有财务数据；历史快照缺 roe 时跳过）
+        has_roe = any(s.get("roe") is not None for s in pool)
 
         passed = []
-
         for s in pool:
-
             if s["cycle_score"] < 0.20:
-
                 continue
-
-            if regime == "weak" and s["cycle_score"] < weak_min_cycle:
-
-                continue
-
+            if regime == "weak":
+                if s["cycle_score"] < weak_min_cycle:
+                    continue
+                if roe_min and has_roe and (s.get("roe") is None or s["roe"] < roe_min):
+                    continue
             passed.append(s)
 
-
-
-        print(f"候选池: {len(scored)} → {len(passed)} 只 (cycle<0.20过滤)")
-
-
-
-        # 已持仓降权只作用于最终名单（浅拷贝，不污染 pool）
+        roe_note = f" + ROE≥{roe_min}%" if (regime == "weak" and roe_min and has_roe) else ""
+        print(f"候选池: {len(scored)} → {len(passed)} 只 (cycle<0.20过滤{roe_note})")
 
         final = []
-
         for s in passed[:top_n]:
-
             item = dict(s)
-
             if item["code"] in portfolio_codes:
-
                 item["alpha_score"] = round(item["alpha_score"] * 0.5, 3)
-
             final.append(item)
 
-
-
         report = {
-
             "generated_at": _utc_now().isoformat(),
-
             "pipeline": {
-
                 "candidates": len(candidates),
-
                 "scored": len(scored),
-
                 "passed": len(passed),
-
                 "final": len(final),
-
             },
-
             "universe": universe,
-
             "pool": pool,
-
             "recommendations": final,
-
             "market": {
-
                 "breadth_pct": breadth_pct,
-
                 "regime": regime,
-
                 "alpha_weights": alpha_w,
-
+                "thresholds": thresholds,
             },
-
         }
-
         return report
+
 
 
 

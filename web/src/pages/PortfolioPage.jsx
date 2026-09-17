@@ -280,7 +280,7 @@ function MarketSentimentCard({ d }) {
         <div className="stat" style={{ padding: '8px 4px' }}><div className="t">20日平均收益</div><div className={`v fmt ${signedCls(ms.avg_return_20d)}`}>{signedPct(ms.avg_return_20d)}</div></div>
         <div className="stat" style={{ padding: '8px 4px' }}><div className="t">情绪 z 分</div><div className={`v fmt ${signedCls(ms.avg_z_score)}`}>{signedPct(ms.avg_z_score)}</div><div className="s">收益/波动 标准化</div></div>
       </div>
-      <div style={{ fontSize: 12, color: 'var(--text-dim)', margin: '6px 0 2px' }}>指数（20日）</div>
+      <div style={{ fontSize: 12, color: 'var(--text-dim)', margin: '6px 0 2px' }}>指数（现价 / 5日 / 20日）</div>
       {Object.entries(indices).map(([name, it]) => {
         const ok = it && it.available
         return (
@@ -288,7 +288,7 @@ function MarketSentimentCard({ d }) {
             <span style={{ width: 62, fontWeight: 600 }}>{name}</span>
             {ok ? (
               <>
-                <span>{fmt(it.latest_close)}</span>
+                <span>现价 {fmt(it.latest_close)}</span>
                 <span className={`${signedCls(it.return_5d)}`} style={{ width: 68, textAlign: 'right' }}>{signedPct(it.return_5d)} / 5日</span>
                 <span className={`${signedCls(it.return_20d)}`} style={{ width: 70, textAlign: 'right' }}>{signedPct(it.return_20d)} / 20日</span>
                 <span className="muted" style={{ marginLeft: 'auto' }}>波动 {fmt(it.volatility_20d)}%</span>
@@ -320,6 +320,57 @@ function BreadthCard({ d }) {
   const mb = d.market_breadth || {}
   const corr = d.correlation || {}
   const ms = d.market_sentiment || {}
+
+  const renderValue = (name, item) => {
+    switch (name) {
+      case '大盘宽度':
+        return (
+          <span>
+            <b style={{ color: 'var(--accent)' }}>{item.width}</b>
+            {' · '}站上MA20 <b>{item.above_ma20_pct}%</b> / MA60 <b>{item.above_ma60_pct}%</b>
+            {' · 样本 '}{item.sample} 只
+          </span>
+        )
+      case '组合相关性': {
+        const pairs = item.pairs || []
+        const head = pairs.slice(0, 3).map(p => `${p.pair} ${p.corr}`).join('、')
+        return (
+          <span>
+            平均相关 <b>{fmt(item.avg_corr, 2)}</b>
+            {head ? <> · 高相关：{head}</> : ' · 无显著高相关对'}
+          </span>
+        )
+      }
+      case '两融余额':
+        return (
+          <span>
+            两融 <b>{fmt(item.rzrqye, 0)}亿</b>（融资 {fmt(item.rzye, 0)}亿 / 融券 {fmt(item.rqye, 0)}亿）
+            <span style={{ color: 'var(--text-dim)' }}> · {item.date}</span>
+          </span>
+        )
+      case '全市场主力资金':
+        return (
+          <span>
+            <b className={signedCls(item.net_main_5d)}>{item.label} {fmt(Math.abs(item.net_main_5d), 0)}亿</b>
+            {' · 近5日 '}{item.pos_days} 净流入
+            <span style={{ color: 'var(--text-dim)' }}> · 截至 {item.latest_date}</span>
+          </span>
+        )
+      case '行业资金流': {
+        const inflow = (item.top_inflow || []).slice(0, 3).map(x => `${x.industry} +${fmt(x.net_flow, 1)}亿`).join('、')
+        const outflow = (item.top_outflow || []).slice(0, 3).map(x => `${x.industry} ${fmt(Math.abs(x.net_flow), 1)}亿`).join('、')
+        return (
+          <span style={{ display: 'block', lineHeight: 1.6 }}>
+            <div>流入：{inflow || '—'}</div>
+            <div>流出：{outflow || '—'}</div>
+          </span>
+        )
+      }
+      default:
+        return null
+    }
+  }
+
   const rows = [
     ['大盘宽度', mb, mb.available ? '' : mb.reason],
     ['组合相关性', corr, corr.available ? '' : (corr.reason || '需 ≥2 只持仓方可计算')],
@@ -330,19 +381,20 @@ function BreadthCard({ d }) {
   return (
     <div className="sect">
       <div className="sect-title">大盘宽度 / 资金面</div>
-      {rows.map(([name, item, reason]) => (
-        <div key={name} style={{ padding: '7px 0', fontSize: 13, borderBottom: '1px solid var(--border)' }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
-            <span style={{ fontWeight: 600 }}>{name}</span>
-            {item && item.available ? (
-              <span style={{ color: 'var(--text-dim)', fontSize: 12.5 }}>已就绪 ✓</span>
-            ) : (
-              <span className="tag gray" style={{ fontSize: 11 }}>暂不可用</span>
-            )}
+      {rows.map(([name, item, reason]) => {
+        const ok = item && item.available
+        return (
+          <div key={name} style={{ padding: '7px 0', fontSize: 13, borderBottom: '1px solid var(--border)' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
+              <span style={{ fontWeight: 600 }}>{name}</span>
+              {!ok && <span className="tag gray" style={{ fontSize: 11 }}>暂不可用</span>}
+            </div>
+            <div style={{ fontSize: 12.5, marginTop: 3, color: ok ? 'var(--text)' : 'var(--text-dim)' }}>
+              {ok ? renderValue(name, item) : `↳ ${reason || '数据暂不可用'}`}
+            </div>
           </div>
-          {reason && <div style={{ fontSize: 12, color: 'var(--text-dim)', marginTop: 2 }}>↳ {reason}</div>}
-        </div>
-      ))}
+        )
+      })}
     </div>
   )
 }

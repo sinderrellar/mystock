@@ -453,6 +453,13 @@ class SectorRadarEngine:
         lo_rsi, hi_rsi = (min(rsi_vals, default=30), max(rsi_vals, default=70)) if rsi_vals else (30, 70)
         lo_to, hi_to = (min(turnover_vals, default=0), max(turnover_vals, default=5)) if turnover_vals else (0, 5)
 
+        # 换手率权重：全市场换手率缺失时（turnover_vals 为空，如 Sina 源无「换手率」列），
+        # 剔除换手项并把剩余权重归一化到 [0,1]，避免动量分被压缩到 [0,0.85] 区间，
+        # 导致 hot/warm 阈值整体偏严、状态标签被低估。换手率数据补齐后自动恢复 15% 权重。
+        has_turnover = bool(turnover_vals)
+        w_b, w_r20, w_rsi, w_to, w_r5 = 0.25, 0.30, 0.20, (0.15 if has_turnover else 0.0), 0.10
+        w_total = w_b + w_r20 + w_rsi + w_to + w_r5
+
         for m in all_metrics:
             b = _norm(m["breadth_pct"], lo_b, hi_b) if hi_b > lo_b else 0.5
             r20 = _norm(m["avg_ret_20d"] or 0, lo_r20, hi_r20) if hi_r20 > lo_r20 else 0.5
@@ -461,8 +468,8 @@ class SectorRadarEngine:
             r5 = _norm(m["avg_ret_5d"] or 0, lo_r5, hi_r5) if hi_r5 > lo_r5 else 0.5
 
             momentum_score = (
-                b * 0.25 + r20 * 0.30 + rsi * 0.20 + to * 0.15 + r5 * 0.10
-            )
+                b * w_b + r20 * w_r20 + rsi * w_rsi + to * w_to + r5 * w_r5
+            ) / w_total
             m["momentum_score"] = round(momentum_score, 3)
 
             hot_pct = _get_radar_config().get("momentum", {}).get("hot", 0.7)

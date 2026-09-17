@@ -42,6 +42,38 @@ def _to_float(v: Any, default: float = 0.0) -> float:
         return default
 
 
+def _estimate_disclosure(report_period: Any) -> Optional[str]:
+    """按 report_period 估算财报披露日（estimated_disclosure 缺失时的兜底）。
+
+    规则同 import_historical_financials.estimate_disclosure_date：
+      年报(12-31) → +120 天；半年报(06-30) → +62 天；季报(03-31/09-30) → +45 天。
+    用于 look-ahead 截断：财报到期日之前的历史日期不得引用该财报。
+    """
+    try:
+        dt = datetime.strptime(str(report_period), "%Y%m%d")
+    except (TypeError, ValueError):
+        return None
+    if dt.month == 12 and dt.day == 31:
+        return (dt + timedelta(days=120)).strftime("%Y-%m-%d")
+    if dt.month == 6 and dt.day == 30:
+        return (dt + timedelta(days=62)).strftime("%Y-%m-%d")
+    return (dt + timedelta(days=45)).strftime("%Y-%m-%d")
+
+
+def _find_financial_as_of(fin_coll, code: str, target_date: str):
+    """取 target_date 之前最新已披露的财报。
+
+    优先用 estimated_disclosure 字段做 look-ahead 截断；该字段缺失时（akshare 实时导入
+    不写此字段）按 report_period 估算披露日。否则 1893 只 akshare 标的会静默拿不到财报，
+    value/growth/quality 因子全部塌缩为 0（中国黄金 600916 即此情况）。
+    """
+    for doc in fin_coll.find({"code": code}).sort("report_period", -1):
+        ed = doc.get("estimated_disclosure") or _estimate_disclosure(doc.get("report_period"))
+        if ed and str(ed)[:10] <= target_date:
+            return doc
+    return None
+
+
 # ================================================================
 # 单日计算核心
 # ================================================================
@@ -87,7 +119,7 @@ def _compute_date(store: MongoFactorDataStore, target_date: str,
     for doc in basic.find(
         {"code": {"$in": codes}},
         {"code": 1, "name": 1, "industry": 1, "industry_code": 1,
-         "market": 1, "display_market": 1, "dividend_yield": 1,
+         "market": 1, "display_market": 1,
          "pe": 1, "pb": 1, "_id": 0},
     ):
         name = str(doc.get("name", ""))
@@ -122,15 +154,15 @@ def _compute_date(store: MongoFactorDataStore, target_date: str,
                 "volume": price_map[code]["volume"],
                 "pe": info.get("pe"),
                 "pb": info.get("pb"),
-                "dividend_yield": info.get("dividend_yield"),
+                "dividend_yield": None,  # 下方从 stock_dividend 补（basic_info 无此字段）
                 "group": loader.get_group(info.get("industry", "")),
                 "updated_at": datetime.now(_UTC),
             }
             # 补股息率 TTM + 一致预期
             try:
-                dv = store.db["stock_dividend"].find_one({"code": code})
+                dv = store.db["stock_dividend"].find_one({"code": code}, sort=[("trade_date", -1)])
                 if dv:
-                    doc["dividend_yield"] = dv.get("dv_ttm") or dv.get("dv_ratio") or doc["dividend_yield"]
+                    doc["dividend_yield"] = next((v for v in (dv.get("dv_ttm"), dv.get("dv_ratio"), doc["dividend_yield"]) if v is not None and v == v), None)
             except Exception:
                 pass
             try:
@@ -242,8 +274,7 @@ def _compute_date(store: MongoFactorDataStore, target_date: str,
             if not info: continue
             ind = info.get("industry", "")
             pe_val = None
-            fin = fin_coll.find_one({"code": code, "estimated_disclosure": {"$lte": target_date}},
-                                    sort=[("report_period", -1)])
+            fin = _find_financial_as_of(fin_coll, code, target_date)
             if fin:
                 eps = fin.get("eps")
                 if eps and eps > 0:
@@ -279,10 +310,7 @@ def _compute_date(store: MongoFactorDataStore, target_date: str,
             # 历史 PE/PB（从财报反算）
             pe = None
             pb = None
-            fin = fin_coll.find_one(
-                {"code": code, "estimated_disclosure": {"$lte": target_date}},
-                sort=[("report_period", -1)],
-            )
+            fin = _find_financial_as_of(fin_coll, code, target_date)
             fin_eps = fin.get("eps") if fin else None
             fin_bps = fin.get("bps") if fin else None
             if fin_eps and fin_eps > 0:
@@ -296,6 +324,16 @@ def _compute_date(store: MongoFactorDataStore, target_date: str,
             except Exception:
                 quotes = []
 
+            # ── V2 动量：百分位排名 + MA结构（先算，供各组 composite 使用，避免算完再覆盖导致自相矛盾）──
+            tdoc = trend_docs_all.get(code)
+            if tdoc:
+                v2, v2_details = pyramid.calculate_momentum_v2(
+                    tdoc.get("returns", {}) or {}, tdoc.get("ma", {}) or {},
+                    ret5_arr, ret20_arr, ret60_arr)
+            else:
+                v2 = 0.5
+                v2_details = {"available": True, "method": "v2_percentile", "missing": True}
+
             # 4 组各算一份
             factors = {}
             for group_name in all_groups:
@@ -308,13 +346,13 @@ def _compute_date(store: MongoFactorDataStore, target_date: str,
                     stock_dict = {
                         "code": code, "name": name,
                         "pe": pe, "pb": pb,
-                        "dividend_yield": info.get("dividend_yield"),
                         "industry_code": info.get("industry_code"),
                         "industry": industry, "market": market,
                     }
                     factor = pyramid.calculate_composite_score(
                         stock_dict, quotes, fin, context=context,
-                        override_weights=w, override_scoring=s)
+                        override_weights=w, override_scoring=s,
+                        override_momentum=v2, override_momentum_details=v2_details)
                     factors[group_name] = {
                         "composite_score": factor.get("composite_score", 0),
                         "factor_scores": factor.get("factor_scores", {}),
@@ -324,26 +362,6 @@ def _compute_date(store: MongoFactorDataStore, target_date: str,
                         "composite_score": 0,
                         "factor_scores": {},
                     }
-
-            # ── V2 动量：百分位排名 + MA结构，替换各组的旧 momentum 分 ──
-            tdoc = trend_docs_all.get(code)
-            if tdoc:
-                rets = tdoc.get("returns", {})
-                ma = tdoc.get("ma", {})
-                r5 = rets.get("return_5d", 0) or 0
-                r20 = rets.get("return_20d", 0) or 0
-                r60 = rets.get("return_60d", 0) or 0
-                p5  = _pct_rank(r5, ret5_arr)
-                p20 = _pct_rank(r20, ret20_arr)
-                p60 = _pct_rank(r60, ret60_arr)
-                ma_bull = 1 if (ma.get("ma5",0) or 0) > (ma.get("ma20",0) or 0) > (ma.get("ma60",0) or 0) else 0
-                v2 = (0.4*p60*100 + 0.4*p20*100 + 0.2*p5*100 + 5*ma_bull) / 105  # 归一化 0~1
-            else:
-                v2 = 0.5
-
-            for g in factors:
-                if "factor_scores" in factors[g]:
-                    factors[g]["factor_scores"]["momentum"] = round(v2, 3)
 
             # ── turnaround_score（估值+盈利+价格+拐点）──
             ta_score = 0.5  # 默认

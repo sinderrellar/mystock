@@ -603,13 +603,13 @@ class DebateSessionCreate(BaseModel):
     market: str = "A股"
     first_message: str = ""
     mode: str = "normal"
-    web: bool = True
+    web: bool = False
 
 
 class DebateMessageCreate(BaseModel):
     content: str = Field(..., description="本轮用户问题")
     mode: str = "normal"
-    web: bool = True
+    web: bool = False
 
 
 @app.post("/api/debate/sessions")

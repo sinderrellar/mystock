@@ -66,7 +66,10 @@ class DataCapabilityService:
         self.importer = FactorDataImporter(self.store, quote_limit=quote_limit)
 
     def get_data_status(self, asset: Dict[str, Any], needs: Optional[List[str]] = None) -> Dict[str, Any]:
-        needs = needs or DEFAULT_NEEDS
+        needs = list(needs or DEFAULT_NEEDS)
+        # ETF 无财务报表，永不把 financial 列为缺失项（与 portfolio_strategy._data_needs_for_asset 对齐）
+        if asset.get("asset_type") == "etf" and "financial" in needs:
+            needs.remove("financial")
         market = asset.get("market", "A股")
         code = _clean_code(asset.get("code"), market)
         status = {

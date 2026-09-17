@@ -390,13 +390,10 @@ class NewsSentimentAnalyzer:
         with open(config_path) as f:
             cfg = yaml.safe_load(f)
         llm = cfg.get("llm", {})
-        self._client = Anthropic(
-            base_url=llm.get("base_url", "https://api.deepseek.com/anthropic"),
-            api_key=llm.get("api_key", ""),
-        )
-        self._model = llm.get("model", "deepseek-v4-flash")
+        # 情绪解析改用 wecode（Claude Code CLI 封装），与投资助手/智辩共用同一 LLM 通道，
+        # 不再直连 DeepSeek API。enabled 取决于 wecode 二进制是否存在（而非 api_key）。
         self._timeout = llm.get("timeout", 30)
-        self._enabled = bool(llm.get("api_key"))
+        self._enabled = os.path.exists(os.environ.get("WECODE_BIN", "/root/.wecode/bin/wecode"))
         self._sentiment_cache: Dict[str, Dict] = {}
         self._max_retries = 2
         self._mongo_sentiment_col = self._init_mongo_cache()
@@ -481,21 +478,21 @@ class NewsSentimentAnalyzer:
         return hashlib.md5(text.encode()).hexdigest()
 
     def _call_llm(self, prompt: str, max_tokens: int = 150) -> Optional[str]:
-        """LLM 调用（带重试），返回响应文本或 None。"""
+        """LLM 调用（wecode -p，带重试），返回响应文本或 None。
+
+        改用 wecode（Claude Code CLI 封装）替代直连 DeepSeek API：与投资助手/智辩
+        共用同一条 LLM 通道（copilot.weibo.com 代理），不再维护两套 LLM 后端。
+        wecode 输出里的模型 warning 行由 clean_output 剔除。max_tokens 参数保留
+        仅为兼容旧签名，wecode 自行控制生成长度。
+        """
         for attempt in range(self._max_retries + 1):
             try:
-                response = self._client.messages.create(
-                    model=self._model,
-                    max_tokens=max_tokens,
-                    temperature=0,
-                    messages=[{"role": "user", "content": prompt}],
-                    timeout=self._timeout,
-                )
-                # DeepSeek 推理模型返回 [ThinkingBlock, TextBlock]，需找 TextBlock
-                for block in response.content:
-                    if hasattr(block, 'text'):
-                        return block.text.strip()
-                return None
+                from debate_engine import clean_output, run_agent
+
+                # wecode 有 agent 启动开销，超时给足（至少 120s）
+                raw = run_agent(prompt, timeout=max(self._timeout, 120))
+                text = clean_output(raw).strip()
+                return text or None
             except Exception:
                 if attempt < self._max_retries:
                     time.sleep(1)
