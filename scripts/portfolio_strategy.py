@@ -2219,8 +2219,24 @@ def format_review(report: Dict[str, Any]) -> str:
         f"风格倾向: {diagnosis.get('risk_tone','')}",
     ]
 
-    # 市场资金面
+    # 市场阶段判定（复用已取到的 market_sentiment，无额外数据请求）
     ms = report.get("market_sentiment", {})
+    try:
+        from market_phase import (determine_market_phase, extract_phase_inputs,
+                                 format_market_phase)
+        # market_breadth 为 dict：{"available": bool, "above_ma20_pct": float, ...}
+        _breadth = report.get("market_breadth")
+        if isinstance(_breadth, dict) and _breadth.get("available"):
+            _breadth = _breadth.get("above_ma20_pct")
+        else:
+            _breadth = None
+        _phase = determine_market_phase(**extract_phase_inputs(ms, breadth_pct=_breadth))
+        lines.append(format_market_phase(_phase))
+        lines.append(f"  阶段依据: {'; '.join(_phase.get('evidence', []))}")
+    except Exception:
+        pass  # 阶段判定失败不影响主报告
+
+    # 市场资金面
     if ms.get("available"):
         nf = ms.get("north_bound", {})
         mg = ms.get("margin", {})

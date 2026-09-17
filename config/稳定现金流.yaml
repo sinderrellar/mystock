@@ -74,6 +74,12 @@ scoring:
     good: 0.8
     average: 0.5
     below_avg: 0.3
+  fcf_to_net_income:          # 自由现金流/净利润（盈利质量）
+    excellent: 0.8
+    very_good: 0.6
+    good: 0.5
+    average: 0.2
+    below_avg: 0.0
 
   # 动量因子（不在意动量）
   return_1m:

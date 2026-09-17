@@ -756,8 +756,12 @@ class MarketDataProvider:
                 result["bars"] = quotes
                 result["data_date"] = quotes[0].get("trade_date", "")
                 result["source"] = "mongodb"
-                age = _data_age_days(result["data_date"])
+                reference_date = _parse_date(as_of_date) if as_of_date else _utc_now()
+                data_date = _parse_date(result["data_date"])
+                age = ((reference_date - data_date).total_seconds() / 86400
+                       if reference_date and data_date else None)
                 result["stale"] = (age is not None and age > 1)
+                # 历史计算必须停在 as_of_date，不能为追求“新鲜”而混入当前行情。
                 if not result["stale"] or historical_mode:
                     return result
                 # MongoDB 数据过期，继续走 Yahoo 补齐
@@ -789,6 +793,14 @@ class MarketDataProvider:
             yahoo_bars = self._get_yahoo_bars(yahoo_symbol, days)
             if not yahoo_bars:
                 continue
+            if as_of_date:
+                cutoff = _parse_date(as_of_date)
+                yahoo_bars = [
+                    bar for bar in yahoo_bars
+                    if not cutoff or (_parse_date(bar.get("trade_date")) or cutoff) <= cutoff
+                ]
+                if not yahoo_bars:
+                    continue
             yahoo_date = yahoo_bars[0].get("trade_date", "")
             # 优先用 Yahoo 数据（转 datetime 比较，兼容 "20260607" 和 "2026-06-07" 格式）
             yahoo_dt = _parse_date(yahoo_date)
@@ -797,7 +809,10 @@ class MarketDataProvider:
                 result["bars"] = yahoo_bars
                 result["data_date"] = yahoo_date
                 result["source"] = "yahoo"
-                age = _data_age_days(yahoo_date)
+                reference_date = _parse_date(as_of_date) if as_of_date else _utc_now()
+                data_date = _parse_date(yahoo_date)
+                age = ((reference_date - data_date).total_seconds() / 86400
+                       if reference_date and data_date else None)
                 result["stale"] = (age is not None and age > 1)
                 if result["stale"]:
                     result["stale_reason"] = f"数据截止 {yahoo_date}（{age:.0f}天前）"
@@ -971,13 +986,15 @@ class MarketDataProvider:
             except Exception:
                 pass  # 取不到实时价就沿用昨日数据
 
-        closes = [b["close"] for b in bars if b.get("close", 0) > 0]
+        valid_bars = [b for b in bars if _to_float(b.get("close"), 0) > 0]
+        closes = [_to_float(b.get("close")) for b in valid_bars]
         if len(closes) < 25:
             return self._unavailable(f"有效收盘价样本不足: {len(closes)}")
 
-        highs = [b.get("high", 0) or 0 for b in bars]
-        lows = [b.get("low", 0) or 0 for b in bars]
-        volumes = [b.get("volume", 0) or 0 for b in bars]
+        opens = [_to_float(b.get("open"), 0) for b in valid_bars]
+        highs = [_to_float(b.get("high"), 0) for b in valid_bars]
+        lows = [_to_float(b.get("low"), 0) for b in valid_bars]
+        volumes = [_to_float(b.get("volume"), 0) for b in valid_bars]
 
         latest = closes[0]
         ma5 = self._ma(closes, 5)
@@ -989,7 +1006,8 @@ class MarketDataProvider:
         volatility_20d = self._volatility(closes, 20)
 
         technical_indicators = self._calc_technical_indicators(
-            closes, highs, lows, volumes, price_to_decision_rate,
+            closes, highs, lows, volumes, price_to_decision_rate, opens=opens,
+            stale=bool(bars_result.get("stale")),
         )
 
         volume_contracting = self._calc_volume_contraction(volumes)
@@ -1087,7 +1105,8 @@ class MarketDataProvider:
 
     def _calc_technical_indicators(
         self, closes: List[float], highs: List[float], lows: List[float],
-        volumes: List[float], rate: float,
+        volumes: List[float], rate: float, opens: Optional[List[float]] = None,
+        stale: bool = False,
     ) -> Dict[str, Any]:
         latest = closes[0]
         rsi14 = self._rsi(closes, 14)
@@ -1114,6 +1133,20 @@ class MarketDataProvider:
         latest_vol = volumes[0] if volumes else None
         vol_vs_ma20 = latest_vol / vol_ma20 if latest_vol and vol_ma20 else None
 
+        # P0 新增指标：ATR / 乖离率 BIAS / 量比 / 20日最大回撤
+        # P1 新增指标：MA 排列 / CCI / 日K数据质量分
+        # 注意：bars 为倒序（最新在前），各计算函数内部已按倒序口径处理
+        atr_val, atr_pct = self._atr(highs, lows, closes, 20)
+        bias_ma5 = self._bias(closes, 5)
+        bias_ma10 = self._bias(closes, 10)
+        bias_ma20 = self._bias(closes, 20)
+        volume_ratio = self._volume_ratio(volumes, 20)
+        max_drawdown_20d = self._max_drawdown(closes, 20)
+        cci14 = self._cci(highs, lows, closes, 14)
+        ma_alignment = self._ma_alignment(closes)
+        quality_score, quality_flags = self._daily_quality_score(
+            closes, highs, lows, volumes, opens=opens, stale=stale)
+
         return {
             "rsi14": round(rsi14, 2) if rsi14 is not None else None,
             "macd": macd,
@@ -1121,6 +1154,19 @@ class MarketDataProvider:
             "kdj": kdj,
             "volume_price_signal": self._volume_price_signal(closes, volumes),
             "range_position": ranges,
+            "atr_20": round(atr_val, 4) if atr_val is not None else None,
+            "atr_20_pct": round(atr_pct, 2) if atr_pct is not None else None,
+            "bias": {
+                "ma5": round(bias_ma5, 2) if bias_ma5 is not None else None,
+                "ma10": round(bias_ma10, 2) if bias_ma10 is not None else None,
+                "ma20": round(bias_ma20, 2) if bias_ma20 is not None else None,
+            },
+            "volume_ratio": round(volume_ratio, 2) if volume_ratio is not None else None,
+            "max_drawdown_20d_pct": round(max_drawdown_20d, 2) if max_drawdown_20d is not None else None,
+            "cci14": round(cci14, 2) if cci14 is not None else None,
+            "ma_alignment": ma_alignment,
+            "daily_quality_score": quality_score,
+            "daily_quality_flags": quality_flags,
             "volume": {
                 "latest": round(latest_vol, 2) if latest_vol is not None else None,
                 "ma5": round(vol_ma5, 2) if vol_ma5 is not None else None,
@@ -1241,6 +1287,169 @@ class MarketDataProvider:
             "percent_b": round(percent_b, 4) if percent_b is not None else None,
             "bandwidth_pct": round(bandwidth, 2) if bandwidth is not None else None,
         }
+
+    @staticmethod
+    def _atr(highs: List[float], lows: List[float], closes: List[float],
+             n: int = 20) -> Tuple[Optional[float], Optional[float]]:
+        """平均真实波幅 ATR(n)。输入为倒序序列（最新在前）。
+
+        返回 (ATR 绝对值, ATR 占最新收盘价百分比)。
+        TR = max(H-L, |H-prev_C|, |L-prev_C|)。
+        """
+        # 长度一致性防御：closes 过滤过无效值，可能与 highs/lows 长度不同
+        if len(closes) < n + 1 or len(highs) < len(closes) or len(lows) < len(closes):
+            return None, None
+        trs = []
+        # 倒序：i 从 0（最新）到 n-1，前一日收盘为 closes[i+1]
+        for i in range(n):
+            prev_close = closes[i + 1]
+            tr = max(
+                highs[i] - lows[i],
+                abs(highs[i] - prev_close),
+                abs(lows[i] - prev_close),
+            )
+            trs.append(tr)
+        atr = sum(trs) / n
+        last_close = closes[0]
+        if last_close <= 0:
+            return round(atr, 4), None
+        return round(atr, 4), round(atr / last_close * 100, 2)
+
+    @staticmethod
+    def _bias(closes: List[float], ma_period: int) -> Optional[float]:
+        """乖离率 BIAS = (Close - MA) / MA * 100。输入为倒序序列（最新在前）。"""
+        if len(closes) < ma_period:
+            return None
+        ma = sum(closes[:ma_period]) / ma_period
+        if ma <= 0:
+            return None
+        return (closes[0] - ma) / ma * 100
+
+    @staticmethod
+    def _volume_ratio(volumes: List[float], n: int = 20) -> Optional[float]:
+        """量比 = 当日成交量 / 前 n 日均量。输入为倒序序列（最新在前）。"""
+        if len(volumes) < 2:
+            return None
+        prev = volumes[1:n + 1]  # 剔除当日（index 0）后的前 n 日
+        valid = [v for v in prev if v and v > 0]
+        if not valid:
+            return None
+        base = sum(valid) / len(valid)
+        if base <= 0 or not volumes[0]:
+            return None
+        return volumes[0] / base
+
+    @staticmethod
+    def _max_drawdown(closes: List[float], n: int = 20) -> Optional[float]:
+        """近 n 日最大回撤百分比（≤0）。输入为倒序序列（最新在前）。"""
+        window = closes[:n] if len(closes) >= n else closes
+        if len(window) < 2:
+            return None
+        # 转为时间正序计算回撤
+        chrono = list(reversed(window))
+        peak = chrono[0]
+        max_dd = 0.0
+        for c in chrono:
+            if c > peak:
+                peak = c
+            if peak > 0:
+                dd = c / peak - 1.0
+                if dd < max_dd:
+                    max_dd = dd
+        return max_dd * 100
+
+    @staticmethod
+    def _cci(highs: List[float], lows: List[float], closes: List[float],
+             n: int = 14) -> Optional[float]:
+        """CCI(n)。TP=(H+L+C)/3, CCI=(TP-MA(TP))/(0.015*mean_deviation)。
+
+        输入为倒序序列（最新在前），取最近 n 根计算。
+        """
+        # 长度一致性防御（同 _atr）
+        if len(closes) < n or len(highs) < len(closes) or len(lows) < len(closes):
+            return None
+        tps = [(h + l + c) / 3 for h, l, c in zip(highs[:n], lows[:n], closes[:n])]
+        tp_ma = sum(tps) / n
+        mean_dev = sum(abs(tp - tp_ma) for tp in tps) / n
+        if mean_dev == 0:
+            return None
+        return (tps[0] - tp_ma) / (0.015 * mean_dev)
+
+    @staticmethod
+    def _ma_alignment(closes: List[float]) -> Optional[str]:
+        """MA5/MA20/MA60 排列结构：bullish(多头) / bearish(空头) / mixed(混合)。
+
+        输入为倒序序列（最新在前）。
+        """
+        if len(closes) < 60:
+            return None
+        ma5 = sum(closes[:5]) / 5
+        ma20 = sum(closes[:20]) / 20
+        ma60 = sum(closes[:60]) / 60
+        if ma5 >= ma20 >= ma60:
+            return "bullish"
+        if ma5 <= ma20 <= ma60:
+            return "bearish"
+        return "mixed"
+
+    @staticmethod
+    def _daily_quality_score(closes: List[float], highs: List[float],
+                             lows: List[float], volumes: List[float],
+                             opens: Optional[List[float]] = None,
+                             stale: bool = False) -> Tuple[float, str]:
+        """日K数据质量分 0-100，附审计 flags（分号分隔）。
+
+        扣分项：样本不足 / 非法 OHLC / 非正价格 / 缺量 / stale。
+        输入为倒序序列（最新在前）。
+        """
+        score = 100.0
+        flags: List[str] = []
+        opens = list(opens or [])
+        if len(highs) < len(closes):
+            highs = list(highs) + [closes[i] for i in range(len(highs), len(closes))]
+        if len(lows) < len(closes):
+            lows = list(lows) + [closes[i] for i in range(len(lows), len(closes))]
+        if len(opens) < len(closes):
+            opens += [closes[i] for i in range(len(opens), len(closes))]
+        n = len(closes)
+        if n < 30:
+            score -= 35
+            flags.append("short_history_lt30")
+        elif n < 60:
+            score -= 15
+            flags.append("short_history_lt60")
+
+        # OHLC 合法性（逐条校验最近 60 根即可，避免全量 O(n) 开销过大）
+        check_n = min(n, 60)
+        invalid_ohlc = False
+        non_positive = False
+        for i in range(check_n):
+            c = closes[i]
+            if c <= 0:
+                non_positive = True
+                continue
+            o, h, l = opens[i], highs[i], lows[i]
+            if o <= 0:
+                non_positive = True
+            if h < max(o, c) or l > min(o, c) or h < l:
+                invalid_ohlc = True
+        if invalid_ohlc:
+            score -= 30
+            flags.append("invalid_ohlc")
+        if non_positive:
+            score -= 35
+            flags.append("non_positive_price")
+
+        # 成交量缺失
+        if not volumes or all(v <= 0 for v in volumes[:check_n]):
+            score -= 12
+            flags.append("missing_volume")
+
+        if stale:
+            score -= 25
+            flags.append("stale_cache")
+
+        return round(max(score, 0.0), 1), ";".join(flags)
 
     # ---- 趋势分类与解释 ----
 
@@ -2133,6 +2342,7 @@ class MarketDataProvider:
             return {
                 "available": True,
                 "source": "mongodb_eastmoney",
+                "usable_for_phase": True,
                 "latest_date": latest_date,
                 "age_days": age_days,
                 "north_5d_buy": north_5d,
@@ -2167,6 +2377,7 @@ class MarketDataProvider:
             return {
                 "available": True,
                 "source": "tushare_fallback",
+                "usable_for_phase": False,
                 "latest_date": latest_date,
                 "north_5d_buy": round(sum(n5), 2) if n5 else 0,
                 "south_5d_buy": round(sum(s5), 2) if s5 else 0,
@@ -2176,39 +2387,63 @@ class MarketDataProvider:
             return {"available": False, "reason": str(exc)}
 
     def _get_margin_data(self) -> Dict[str, Any]:
-        """融资融券余额（Tushare margin）。两融数据 T+1 发布，当日常为空，回退最近可用交易日。"""
+        """融资融券余额及最近交易日变化（Tushare margin，金额统一为亿元）。
+
+        两融 T+1 发布、当日常空：从今天往前回退最近可用交易日取值；跨交易所（SSE/SZSE/BSE）
+        求和才是全市场口径。另算 rzye_change（融资余额环比），供 market_phase 判定两融趋势。
+        """
         try:
             pro = self._get_tushare_pro()
             if pro is None:
                 return {"available": False}
-            # 两融 T+1：从今天往前最多找 5 个自然日，取最近有数据的那天
-            df = None
-            trade_date = None
-            for i in range(5):
-                d = (_utc_now() - timedelta(days=i)).strftime("%Y%m%d")
-                try:
-                    df = pro.margin(trade_date=d)
-                except Exception:
-                    df = None
-                if df is not None and not df.empty:
-                    trade_date = d
-                    break
-            if df is None or df.empty:
-                return {"available": False}
-            # Tushare margin 按交易所返回多行（SSE/SZSE/BSE），跨交易所求和才是全市场两融；
-            # 原始金额单位是元，统一换算成亿元输出（sum 跨交易所，再 /1e8）。
-            def _sum_yi(col: str) -> Optional[float]:
+
+            def _sum_yi(df, col: str) -> Optional[float]:
+                """跨交易所求和，原始金额单位元 → 亿元。"""
                 try:
                     return round(float(df[col].sum()) / 1e8, 2)
                 except Exception:
                     return None
+
+            # 两融 T+1：从今天往前最多找 5 个自然日，取最近有数据的那天
+            latest_df = None
+            latest_date = None
+            for i in range(5):
+                d = (_utc_now() - timedelta(days=i)).strftime("%Y%m%d")
+                try:
+                    latest_df = pro.margin(trade_date=d)
+                except Exception:
+                    latest_df = None
+                if latest_df is not None and not latest_df.empty:
+                    latest_date = d
+                    break
+            if latest_df is None or latest_df.empty:
+                return {"available": False}
+
+            # 前一交易日 → 融资余额环比（market_phase 的两融趋势信号依赖此字段）
+            rzye_now = _sum_yi(latest_df, "rzye")
+            rzye_change = None
+            for i in range(1, 6):
+                prev_date = (_utc_now() - timedelta(days=i)).strftime("%Y%m%d")
+                if prev_date == latest_date:
+                    continue
+                try:
+                    prev_df = pro.margin(trade_date=prev_date)
+                except Exception:
+                    prev_df = None
+                if prev_df is not None and not prev_df.empty:
+                    rzye_prev = _sum_yi(prev_df, "rzye")
+                    if rzye_now is not None and rzye_prev:
+                        rzye_change = round((rzye_now - rzye_prev) / rzye_prev * 100, 3)
+                    break
+
             return {
                 "available": True, "source": "tushare",
-                "rzye": _sum_yi("rzye"),    # 融资余额(亿)
-                "rqye": _sum_yi("rqye"),    # 融券余额(亿)
-                "rzrqye": _sum_yi("rzrqye"),  # 两融余额合计(亿)
-                "rzmre": _sum_yi("rzmre"),  # 融资买入额(亿)
-                "date": str(trade_date or ""),
+                "rzye": rzye_now,                        # 融资余额(亿)
+                "rqye": _sum_yi(latest_df, "rqye"),      # 融券余额(亿)
+                "rzrqye": _sum_yi(latest_df, "rzrqye"),  # 两融余额合计(亿)
+                "rzmre": _sum_yi(latest_df, "rzmre"),    # 融资买入额(亿)
+                "rzye_change": rzye_change,              # 融资余额环比(%)
+                "date": str(latest_date or ""),
             }
         except Exception:
             return {"available": False}

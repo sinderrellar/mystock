@@ -165,14 +165,16 @@ def _compute_date(store: MongoFactorDataStore, target_date: str,
                     doc["dividend_yield"] = next((v for v in (dv.get("dv_ttm"), dv.get("dv_ratio"), doc["dividend_yield"]) if v is not None and v == v), None)
             except Exception:
                 pass
-            try:
-                fc = store.db["stock_signals"].find_one(
-                    {"code": code}, {"forecast_min": 1, "forecast_max": 1})
-                if fc:
-                    doc["forecast_min"] = fc.get("forecast_min")
-                    doc["forecast_max"] = fc.get("forecast_max")
-            except Exception:
-                pass
+            # stock_signals 没有预测发布日期；历史快照不能使用当前预测。
+            if target_date >= datetime.now(_UTC).strftime("%Y-%m-%d"):
+                try:
+                    fc = store.db["stock_signals"].find_one(
+                        {"code": code}, {"forecast_min": 1, "forecast_max": 1})
+                    if fc:
+                        doc["forecast_min"] = fc.get("forecast_min")
+                        doc["forecast_max"] = fc.get("forecast_max")
+                except Exception:
+                    pass
             meta_coll.update_one(
                 {"code": code, "trade_date": target_date},
                 {"$set": doc}, upsert=True)
@@ -195,6 +197,7 @@ def _compute_date(store: MongoFactorDataStore, target_date: str,
                 trend = {"available": False}
 
             ti = trend.get("technical_indicators", {}) or {}
+            bias = ti.get("bias", {}) or {}
             doc = {
                 "code": code,
                 "trade_date": target_date,
@@ -208,6 +211,18 @@ def _compute_date(store: MongoFactorDataStore, target_date: str,
                 "macd": ti.get("macd", {}),
                 "boll_percent_b": (ti.get("bollinger") or {}).get("percent_b"),
                 "volume_price_signal": ti.get("volume_price_signal"),
+                # P0 新增指标
+                "atr_20_pct": ti.get("atr_20_pct"),
+                "bias_ma5": bias.get("ma5"),
+                "bias_ma10": bias.get("ma10"),
+                "bias_ma20": bias.get("ma20"),
+                "volume_ratio": ti.get("volume_ratio"),
+                "max_drawdown_20d_pct": ti.get("max_drawdown_20d_pct"),
+                # P1 新增指标
+                "cci14": ti.get("cci14"),
+                "ma_alignment": ti.get("ma_alignment"),
+                "daily_quality_score": ti.get("daily_quality_score"),
+                "daily_quality_flags": ti.get("daily_quality_flags"),
             }
             trend_coll.update_one(
                 {"code": code, "trade_date": target_date},
@@ -311,6 +326,11 @@ def _compute_date(store: MongoFactorDataStore, target_date: str,
             pe = None
             pb = None
             fin = _find_financial_as_of(fin_coll, code, target_date)
+            # factor_fin 是送入因子计算用的副本：历史日期剔除当前 forecast，防 look-ahead
+            factor_fin = dict(fin) if fin else None
+            if factor_fin and target_date < datetime.now(_UTC).strftime("%Y-%m-%d"):
+                factor_fin.pop("forecast_min", None)
+                factor_fin.pop("forecast_max", None)
             fin_eps = fin.get("eps") if fin else None
             fin_bps = fin.get("bps") if fin else None
             if fin_eps and fin_eps > 0:
@@ -350,7 +370,7 @@ def _compute_date(store: MongoFactorDataStore, target_date: str,
                         "industry": industry, "market": market,
                     }
                     factor = pyramid.calculate_composite_score(
-                        stock_dict, quotes, fin, context=context,
+                        stock_dict, quotes, factor_fin, context=context,
                         override_weights=w, override_scoring=s,
                         override_momentum=v2, override_momentum_details=v2_details)
                     factors[group_name] = {

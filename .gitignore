@@ -1,5 +1,6 @@
 # Python 缓存
 __pycache__/
+*/__pycache__
 *.py[cod]
 
 # 本机运行时数据 / 日志 / 会话状态（不入库）
