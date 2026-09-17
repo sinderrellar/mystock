@@ -92,19 +92,23 @@ def _parse_date(value: Optional[str]) -> Optional[datetime]:
     return None
 
 
-def _data_age_days(data_date: Optional[str]) -> Optional[float]:
-    """计算数据距今的「交易日」数（跳过周末），无法解析则返回 None。
+def _data_age_days(data_date: Optional[str], reference: Optional[str] = None) -> Optional[float]:
+    """计算 data_date 距 reference（默认今天）的「交易日」数（跳过周末），无法解析则返回 None。
 
     用交易日而非日历天：避免周五收盘数据在周一被误判为「过期 3 天」，
     触发不必要的 Yahoo 兜底（组合全景慢的根因之一，2026-09-07）。
+    reference 用于历史回测（as_of_date）：按截止日而非今天算陈旧度，避免历史快照被误判过期。
     """
     dt = _parse_date(data_date)
     if dt is None:
         return None
-    today = _utc_now().date()
+    ref = _parse_date(reference) if reference else _utc_now()
+    if ref is None:
+        return None
     d = dt.date()
+    end = ref.date()
     days = 0
-    while d < today:
+    while d < end:
         d += timedelta(days=1)
         if d.weekday() < 5:  # 周一~周五计为交易日
             days += 1
@@ -756,10 +760,7 @@ class MarketDataProvider:
                 result["bars"] = quotes
                 result["data_date"] = quotes[0].get("trade_date", "")
                 result["source"] = "mongodb"
-                reference_date = _parse_date(as_of_date) if as_of_date else _utc_now()
-                data_date = _parse_date(result["data_date"])
-                age = ((reference_date - data_date).total_seconds() / 86400
-                       if reference_date and data_date else None)
+                age = _data_age_days(result["data_date"], as_of_date)
                 result["stale"] = (age is not None and age > 1)
                 # 历史计算必须停在 as_of_date，不能为追求“新鲜”而混入当前行情。
                 if not result["stale"] or historical_mode:
